@@ -306,11 +306,56 @@ Re-importing data you already have is harmless — same timestamp, same value.
 
 ---
 
+## Re-authenticating
+
+When `ecobee_reauth_required` is 1 — or the log says *"Re-authentication
+required"* — the refresh token has been rejected by ecobee and no amount of
+waiting fixes it. This is the one failure that needs a human with an
+authenticator app.
+
+**1. Mint a new token.** Same as setup step 1:
+
+```bash
+.venv/bin/python scripts/bootstrap.py
+```
+
+**2. Replace the Secret.** `kubectl create secret` fails when one already
+exists, so pipe through `apply`:
+
+```bash
+kubectl create secret generic ecobee-importer-tokens -n ecobee-runtime-importer --from-literal=refresh_token="$(.venv/bin/python -c 'import json;print(json.load(open("credentials.json"))["refresh_token"])')" --dry-run=client -o yaml | kubectl apply -f -
+```
+
+**3. Restart the pod.** This is required, not optional — credentials are read
+once at startup, so a running importer will keep retrying the dead token
+indefinitely and never notice the new one:
+
+```bash
+kubectl rollout restart deploy/ecobee-runtime-importer -n ecobee-runtime-importer
+```
+
+**4. Clean up and confirm:**
+
+```bash
+rm credentials.json && kubectl logs -n ecobee-runtime-importer deploy/ecobee-runtime-importer -f
+```
+
+**No history is lost.** `runtimeReport` serves up to 31 days retroactively, so
+the startup lookback plus a `--backfill-from` recovers everything the outage
+covered.
+
+> **Each login may invalidate the previous one.** If ecobee's Auth0 tenant
+> issues one refresh token per user per client, re-running bootstrap anywhere
+> kills the token your cluster is using. Mint once, put it straight into the
+> Secret, and don't run bootstrap on a second machine "to check" — that is
+> itself a way to cause this failure.
+
+---
+
 ## Troubleshooting
 
-**`ecobee_reauth_required 1`** — the refresh token is dead. Re-run step 1 and
-update the Secret. No history is lost; the report serves 31 days retroactively,
-so the next cycle plus a `--backfill-from` recovers the gap.
+**`ecobee_reauth_required 1`** — see [Re-authenticating](#re-authenticating)
+above.
 
 **Everything is off by several hours** — a time zone bug. Report rows arrive in
 *thermostat local time*, not UTC (ARCHITECTURE.md §3.2). Check the thermostat's
