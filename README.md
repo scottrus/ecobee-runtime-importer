@@ -66,17 +66,13 @@ app. This step cannot be automated — that is why it is a script you run rather
 than a job that runs.
 
 ```bash
-make setup
+make bootstrap
 ```
 
-```bash
-.venv/bin/python scripts/bootstrap.py
-```
-
-`make setup` uses `uv` when it is installed and falls back to the stdlib `venv`
-otherwise, so this works on a machine that has neither. On Debian and Ubuntu the
-fallback needs `python3-venv` (`apt install python3-venv`) if `python3 -m venv`
-reports that `ensurepip` is unavailable.
+This builds the venv first (`uv` if installed, stdlib `venv` otherwise), so it
+works on a machine with neither. On Debian and Ubuntu the fallback needs
+`python3-venv` (`apt install python3-venv`) if `python3 -m venv` reports that
+`ensurepip` is unavailable.
 
 It prompts for your email, then your password (not echoed), then a 6-digit code
 if your account has TOTP MFA. Push, SMS and email MFA are not supported — only
@@ -98,17 +94,15 @@ the Secret exists:
 
 ### 2. Create the namespace and Secret
 
-The Secret has to exist before the Deployment starts, and it is created
-out-of-band rather than applied from the repo — the importer rotates it in
-place, so a committed copy would go stale immediately.
-
 ```bash
-kubectl apply -f deploy/namespace.yaml
+make secret
 ```
 
-```bash
-kubectl create secret generic ecobee-importer-tokens -n ecobee-runtime-importer --from-literal=refresh_token="$(.venv/bin/python -c 'import json;print(json.load(open("credentials.json"))["refresh_token"])')"
-```
+That applies `deploy/namespace.yaml` and creates the Secret by reading the token
+straight out of the file bootstrap wrote. It is safe to re-run: it replaces an
+existing Secret rather than failing. The Secret is created out-of-band rather
+than applied from the repo because the importer rotates it in place, so a
+committed copy would go stale immediately.
 
 Then delete the local copy — the cluster's is authoritative from here:
 
@@ -133,7 +127,7 @@ single-node VictoriaMetrics. For a cluster install use
 `http://vminsert:8480/insert/0/prometheus/api/v1/import/prometheus`.
 
 ```bash
-kubectl apply -k deploy/
+make deploy
 ```
 
 ### 4. Confirm it works
@@ -306,11 +300,49 @@ Re-importing data you already have is harmless — same timestamp, same value.
 
 ---
 
+## Re-authenticating
+
+When `ecobee_reauth_required` is 1 — or the log says *"Re-authentication
+required"* — the refresh token has been rejected by ecobee and no amount of
+waiting fixes it. This is the one failure that needs a human with an
+authenticator app.
+
+```bash
+make reauth
+```
+
+That is `bootstrap` + `secret` + `restart`: log in, replace the Secret, roll the
+pod. Then clean up and watch it recover:
+
+```bash
+rm credentials.json && kubectl logs -n ecobee-runtime-importer deploy/ecobee-runtime-importer -f
+```
+
+The three steps are each available on their own, and two of them are easy to get
+wrong by hand, which is why they are targets:
+
+- `make secret` **replaces** an existing Secret. Plain `kubectl create secret`
+  fails once one exists, so the setup command is the wrong one for recovery.
+- `make restart` is **required, not optional**. Credentials are read once at
+  startup, so a running importer keeps retrying the dead token every cycle and
+  never notices a corrected Secret.
+
+**No history is lost.** `runtimeReport` serves up to 31 days retroactively, so
+the startup lookback plus a `--backfill-from` recovers everything the outage
+covered.
+
+> **Each login may invalidate the previous one.** If ecobee's Auth0 tenant
+> issues one refresh token per user per client, re-running bootstrap anywhere
+> kills the token your cluster is using. Mint once, put it straight into the
+> Secret, and don't run bootstrap on a second machine "to check" — that is
+> itself a way to cause this failure.
+
+---
+
 ## Troubleshooting
 
-**`ecobee_reauth_required 1`** — the refresh token is dead. Re-run step 1 and
-update the Secret. No history is lost; the report serves 31 days retroactively,
-so the next cycle plus a `--backfill-from` recovers the gap.
+**`ecobee_reauth_required 1`** — see [Re-authenticating](#re-authenticating)
+above.
 
 **Everything is off by several hours** — a time zone bug. Report rows arrive in
 *thermostat local time*, not UTC (ARCHITECTURE.md §3.2). Check the thermostat's

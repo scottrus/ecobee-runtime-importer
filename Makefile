@@ -19,6 +19,12 @@ DEPLOY ?= deploy
 # image really carries the version this working tree claims.
 VERSION := $(shell sed -n 's/^__version__ = "\(.*\)"/\1/p' src/ecobee_importer/__init__.py)
 
+# Derived from deploy/ rather than hardcoded, so renaming either in the manifests
+# cannot leave these targets pointing somewhere else.
+NAMESPACE ?= $(shell sed -n 's/^  name: \(.*\)/\1/p' $(DEPLOY)/namespace.yaml | head -1)
+SECRET    ?= $(shell sed -n 's/^  ECOBEE_SECRET_NAME: "\(.*\)"/\1/p' $(DEPLOY)/configmap.yaml)
+CREDS     ?= ./credentials.json
+
 .DEFAULT_GOAL := help
 
 define missing
@@ -33,6 +39,13 @@ help:
 	@echo
 	@echo "  make setup           create $(VENV) and install the package + dev deps"
 	@echo "  make check           run everything below; the full PR gate"
+	@echo
+	@echo "Install and recovery (needs kubectl):"
+	@echo "  make bootstrap       log in to ecobee, write $(CREDS)"
+	@echo "  make secret          create OR replace the Secret (applies the namespace)"
+	@echo "  make deploy          kubectl apply -k $(DEPLOY)/"
+	@echo "  make restart         roll the deployment (needed after a Secret change)"
+	@echo "  make reauth          bootstrap + secret + restart, for a dead token"
 	@echo
 	@echo "  make lint            ruff check, ruff format --check"
 	@echo "  make fmt             apply ruff formatting and autofixes"
@@ -76,6 +89,61 @@ venv:
 setup: venv
 	@if [ -n "$(UV)" ]; then uv pip install --quiet --python $(PY) -e ".[bootstrap,dev]"; \
 	else $(PIP) install --quiet -e ".[bootstrap,dev]"; fi
+
+# ------------------------------------------------------------ credentials ----
+#
+# The one interactive step in this project, plus the two commands that follow it.
+# They are here because getting them slightly wrong is easy and the failure is
+# expensive: `kubectl create secret` errors when the Secret already exists, and a
+# Secret updated under a running pod is ignored until that pod restarts.
+
+.PHONY: bootstrap
+bootstrap: setup
+	@$(PY) scripts/bootstrap.py --out $(CREDS)
+
+# Both names are scraped out of YAML, so a reformat could silently yield an empty
+# string and send these commands at `-n ""`. That is the same shape as the bug
+# that made the importer request secrets at cluster scope, so it is checked.
+.PHONY: check-derived
+check-derived:
+	@test -n "$(NAMESPACE)" || { \
+		echo "ERROR: could not read the namespace from $(DEPLOY)/namespace.yaml"; exit 1; }
+	@test -n "$(SECRET)" || { \
+		echo "ERROR: could not read ECOBEE_SECRET_NAME from $(DEPLOY)/configmap.yaml"; exit 1; }
+
+# Idempotent, and a dependency of `secret` on purpose: creating the Secret before
+# the namespace exists fails with "namespaces not found", which is a trap the
+# ordering of two hand-run commands should not be able to spring.
+.PHONY: namespace
+namespace:
+	@kubectl apply -f $(DEPLOY)/namespace.yaml
+
+.PHONY: deploy
+deploy:
+	@kubectl apply -k $(DEPLOY)/
+
+.PHONY: secret
+secret: check-derived namespace
+	@test -f $(CREDS) || { \
+		echo "ERROR: $(CREDS) not found. Run 'make bootstrap' first."; exit 1; }
+	@echo "==> $(SECRET) in namespace $(NAMESPACE)"
+	@kubectl create secret generic $(SECRET) -n $(NAMESPACE) \
+		--from-literal=refresh_token="$$($(PY) -c \
+			'import json,sys;print(json.load(open(sys.argv[1]))["refresh_token"])' \
+			$(CREDS))" \
+		--dry-run=client -o yaml | kubectl apply -f -
+	@echo "    the cluster's copy is authoritative now; remove the local one:"
+	@echo "      rm $(CREDS)"
+
+.PHONY: restart
+restart: check-derived
+	@kubectl rollout restart deploy/ecobee-runtime-importer -n $(NAMESPACE)
+
+# Full recovery from ecobee_reauth_required, in one step. The restart is not
+# optional: credentials are read once at startup, so a running importer would
+# keep retrying the dead token and never see the corrected Secret.
+.PHONY: reauth
+reauth: bootstrap secret restart
 
 # ---------------------------------------------------------------- python ----
 
