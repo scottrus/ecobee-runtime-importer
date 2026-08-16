@@ -98,11 +98,12 @@ the Secret exists:
 make secret
 ```
 
-That applies `deploy/namespace.yaml` and creates the Secret by reading the token
-straight out of the file bootstrap wrote. It is safe to re-run: it replaces an
-existing Secret rather than failing. The Secret is created out-of-band rather
-than applied from the repo because the importer rotates it in place, so a
-committed copy would go stale immediately.
+That creates the namespace, then creates the Secret by reading the token straight
+out of the file bootstrap wrote. It is safe to re-run: it **replaces** an
+existing Secret rather than failing, so the same command serves first install and
+recovery. The Secret is created out-of-band rather than applied from the repo
+because the importer rotates it in place, so a committed copy would go stale
+immediately.
 
 Then delete the local copy — the cluster's is authoritative from here:
 
@@ -122,9 +123,13 @@ Nothing to build. `deploy/` pins a published image, and every tagged release
 pushes a multi-arch build to GHCR with an SBOM and a signed provenance
 attestation.
 
-Check `ECOBEE_VM_IMPORT_URL` in `deploy/configmap.yaml` first — it defaults to a
-single-node VictoriaMetrics. For a cluster install use
-`http://vminsert:8480/insert/0/prometheus/api/v1/import/prometheus`.
+**Check `ECOBEE_VM_IMPORT_URL` in `deploy/config.env` first.** The importer runs
+in its own namespace, so a bare service name will not resolve — the destination
+needs a fully qualified name:
+
+```
+http://vmsingle-<release>.<namespace>.svc.cluster.local:8428/api/v1/import/prometheus
+```
 
 ```bash
 make deploy
@@ -133,11 +138,27 @@ make deploy
 ### 4. Confirm it works
 
 ```bash
-kubectl logs -n ecobee-runtime-importer deploy/ecobee-runtime-importer
+kubectl logs -n ecobee-runtime-importer deploy/ecobee-runtime-importer -f
 ```
 
-Expect the thermostat list with time zones, then `Imported N samples`. First run
-imports the last 24 hours, so `N` will be in the thousands. Then in VictoriaMetrics:
+A healthy first cycle looks like this:
+
+```
+Loaded credentials: Tokens(refresh=set, access=empty, api_key=unset)
+No access token loaded; refreshing before first request
+Persisted rotated tokens to Secret ...
+Thermostats: Upstairs (America/New_York), Main Floor (...), Basement (...), Suite (...)
+Fetching runtimeReport ... for 4 thermostat(s)
+Wrote 30712 samples to http://.../api/v1/import/prometheus
+Imported 30712 samples, newest bucket ...
+```
+
+`access=empty` on the first line is expected: the Secret holds only the refresh
+token, so the first act is a refresh, and the rotated pair is written straight
+back. The startup lookback pulls 24 hours, so the first count is in the tens of
+thousands; later cycles are a few hundred.
+
+Then in VictoriaMetrics:
 
 ```
 count_over_time(ecobee_zone_temperature_fahrenheit[24h])
@@ -159,11 +180,7 @@ sets `REQUIRE_ALL=1`, which turns each skip into a failure, so a check can never
 appear to have run when it did not. `make help` lists everything.
 
 ```bash
-uv venv --allow-existing && uv pip install -e '.[bootstrap,dev]'
-```
-
-```bash
-.venv/bin/pytest
+make setup && .venv/bin/pytest
 ```
 
 ### Releasing
@@ -174,16 +191,16 @@ they do not:
 
 | | |
 |---|---|
-| the git tag | `v0.1.0` |
-| `__version__` in `src/ecobee_importer/__init__.py` | `0.1.0` |
-| the image tag in `deploy/deployment.yaml` | `0.1.0` |
+| the git tag | `vX.Y.Z` |
+| `__version__` in `src/ecobee_importer/__init__.py` | `X.Y.Z` |
+| the image tag in `deploy/deployment.yaml` | `X.Y.Z` |
 
 That third one is what keeps step 3 of the setup honest: a fresh clone applies
 `deploy/` against an image that this release actually published. `make manifests`
 checks the same agreement locally.
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 The workflow then builds `linux/amd64,linux/arm64`, pushes to GHCR with an SBOM
@@ -202,26 +219,31 @@ ECOBEE_TOKEN_STORE=file ECOBEE_TOKEN_FILE=./credentials.json ECOBEE_VM_IMPORT_UR
 ## Configuration
 
 Everything is environment-driven, and in Kubernetes everything lives in
-`deploy/configmap.yaml`, consumed with `envFrom`. Adapting to a different shape
-is a ConfigMap edit — the Deployment does not need touching, and a key added
-there needs no matching entry in the pod spec.
+`deploy/config.env`, rendered into a ConfigMap by kustomize and consumed with
+`envFrom`. Adapting to a different shape is a one-file edit — the Deployment
+needs no changes, and a key added there needs no matching entry in the pod spec.
 
-Environment is read at process start, so after editing:
+**A config edit rolls the pods by itself.** The ConfigMap is generated, so its
+name carries a hash of the contents; changing `config.env` changes the pod spec,
+and `make deploy` restarts the deployment as a result. That matters because the
+process reads its environment once at startup — with a hand-written ConfigMap, an
+edit applies cleanly, changes nothing, and waits silently for an unrelated
+restart.
 
 ```bash
-kubectl rollout restart deploy/ecobee-runtime-importer -n ecobee-runtime-importer
+make deploy
 ```
 
-That is cheap: there is no persisted state, and the startup lookback re-imports
-recent history idempotently.
+Restarting is cheap: there is no persisted state, and the startup lookback
+re-imports recent history idempotently.
 
 | Variable | Default | Notes |
 |---|---|---|
 | `ECOBEE_TOKEN_STORE` | `file` | `file` or `kubernetes` |
 | `ECOBEE_TOKEN_FILE` | `/var/lib/ecobee/credentials.json` | `file` store only |
-| `ECOBEE_SECRET_NAME` | `ecobee-importer-tokens` | **also in `rbac.yaml`** — see below |
+| `ECOBEE_SECRET_NAME` | `ecobee-importer-tokens` | kustomize copies it into the Role's `resourceNames` |
 | `ECOBEE_SECRET_NAMESPACE` | pod's own namespace | Set only to read a Secret elsewhere |
-| `ECOBEE_VM_IMPORT_URL` | `http://victoriametrics:8428/api/v1/import/prometheus` | |
+| `ECOBEE_VM_IMPORT_URL` | `http://victoriametrics:8428/...` | Code default only; a bare name will not resolve cross-namespace. `config.env` sets a real FQDN |
 | `ECOBEE_VM_AUTH_HEADER_FILE` | — | File whose contents become the `Authorization` header |
 | `ECOBEE_WRITE_TIMEOUT_SECONDS` | `60` | |
 | `ECOBEE_IMPORT_INTERVAL_SECONDS` | `900` | **Hard floor 900.** Lower values are clamped |
@@ -232,36 +254,65 @@ recent history idempotently.
 | `ECOBEE_EXTRA_COLUMNS` | — | CSV. **Adds to** the default set |
 | `ECOBEE_COLUMNS` | — | CSV. **Replaces** the default set |
 | `ECOBEE_EXTRA_LABELS` | — | `key=value,...` on every sample |
-| `ECOBEE_METRICS_PORT` | `9863` | Must match `containerPort` in the Deployment |
+| `ECOBEE_METRICS_PORT` | `9863` | Not set in `config.env` — see below |
 | `ECOBEE_LOG_LEVEL` | `INFO` | |
 
-### Two values that are coupled outside the ConfigMap
+### Where each value is defined once
 
-**`ECOBEE_SECRET_NAME` ↔ `rbac.yaml`.** The Role is scoped to a single Secret by
-`resourceNames`, which is what keeps `patch` on secrets from meaning *every*
-secret in the namespace. Renaming the Secret in the ConfigMap alone gives a 403;
-the importer catches that specific case and logs which file to change.
+Three things used to be "must match" rules kept by comments. They are now
+mechanical:
 
-**`ECOBEE_METRICS_PORT` ↔ `containerPort`.** Changing it in one place leaves the
-Service pointing at nothing.
+**The Secret name** lives only in `config.env`. A kustomize `replacement:` copies
+it into the Role's `resourceNames`, which is what keeps `patch` on secrets from
+meaning *every* secret in the namespace. Renaming it in one place is now the only
+way to rename it.
+
+**The namespace** lives only in the `namespace:` field of `kustomization.yaml`.
+The transformer rewrites every resource including the `Namespace` object, and the
+Makefile reads the same field.
+
+**The metrics port** lives only in `containerPort`. `ECOBEE_METRICS_PORT` is
+deliberately absent from `config.env` — the application default is the same
+number, and the Service targets the port *name*, so nothing can disagree. Set it
+only if you also change `containerPort`.
 
 ### Other shapes
 
 - **Cluster VictoriaMetrics** — point `ECOBEE_VM_IMPORT_URL` at
-  `http://vminsert:8480/insert/0/prometheus/api/v1/import/prometheus`.
+  `http://vminsert.<ns>.svc.cluster.local:8480/insert/0/prometheus/api/v1/import/prometheus`.
 - **Authenticated destination** — mount a Secret and set
   `ECOBEE_VM_AUTH_HEADER_FILE` to the mounted path. It is a *path*, not a value,
   so the credential never enters the ConfigMap, and it is re-read per write so
   rotation needs no restart.
-- **A different namespace** — change `namespace:` in `kustomization.yaml` and the
-  name in `namespace.yaml`. Nothing else needs editing; the Secret's namespace
-  resolves from the pod's own ServiceAccount mount. Note the CRs are only
-  discovered from a non-monitoring namespace if your VMAgent and VMAlert run
-  `selectAllByDefault: true` (or you add matching namespace selectors).
-- **Default-deny egress** — this namespace is new, so it has no NetworkPolicy of
-  its own. If your cluster default-denies, the importer needs egress to
-  `api.ecobee.com`, `auth.ecobee.com`, the Kubernetes API, and your metrics
-  destination.
+- **A different namespace** — change **one line**: `namespace:` in
+  `deploy/kustomization.yaml`. See below.
+- **Network policy** — if your cluster restricts traffic, both directions matter.
+  See the troubleshooting entry on write timeouts.
+
+### Deploying to a different namespace
+
+Edit the `namespace:` field in `deploy/kustomization.yaml`. That is the only
+change required:
+
+```yaml
+namespace: my-namespace
+```
+
+kustomize's transformer rewrites `metadata.namespace` on every namespaced
+resource **and renames the `Namespace` resource itself**, the Makefile reads that
+same field for its `kubectl` targets, and the importer resolves its Secret's
+namespace from the pod's own ServiceAccount mount at runtime. Nothing else — not
+`namespace.yaml`, not `rbac.yaml`, not the Makefile — needs editing.
+
+Check the result before applying:
+
+```bash
+kubectl kustomize deploy/ | grep -E '^kind:|namespace:'
+```
+
+One caveat outside this repo's control: `VMServiceScrape` and `VMRule` are only
+discovered from an arbitrary namespace if your VMAgent and VMAlert run
+`selectAllByDefault: true`, or you add matching namespace selectors.
 - **More than one ecobee account** — a second instance with its own ConfigMap,
   Secret, and `ECOBEE_EXTRA_LABELS=site=...` to keep the series apart.
 
@@ -344,9 +395,23 @@ covered.
 **`ecobee_reauth_required 1`** — see [Re-authenticating](#re-authenticating)
 above.
 
+**Timeout writing to VictoriaMetrics, while ecobee calls succeed** — the
+destination's network policy does not list the importer as a client. A
+`CiliumNetworkPolicy` or `NetworkPolicy` that selects the metrics backend denies
+everything not explicitly allowed, and a denied connection **times out** rather
+than being refused, which reads like DNS or a wrong URL. Cross-namespace rules
+need the namespace label explicitly — a bare `matchLabels` matches only the
+policy's own namespace. Nothing is lost meanwhile: the watermark advances only
+after a successful write, so the backlog imports once the policy is fixed.
+
+**`ZoneInfoNotFoundError` / `No module named 'tzdata'`** — the image has no tz
+database. `tzdata` is a hard dependency for this reason; if you built your own
+image, keep it.
+
 **Everything is off by several hours** — a time zone bug. Report rows arrive in
 *thermostat local time*, not UTC (ARCHITECTURE.md §3.2). Check the thermostat's
-`location.timeZone` in the startup log.
+`location.timeZone` in the startup log. Note the importer now **fails** rather
+than falling back to UTC, precisely so this cannot happen silently.
 
 **Temperatures read like `7.37`** — something reintroduced a ÷10. runtimeReport
 returns decimal degrees (`73.7`) and must not be scaled; beestat's `/10`, the

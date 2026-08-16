@@ -19,10 +19,17 @@ DEPLOY ?= deploy
 # image really carries the version this working tree claims.
 VERSION := $(shell sed -n 's/^__version__ = "\(.*\)"/\1/p' src/ecobee_importer/__init__.py)
 
-# Derived from deploy/ rather than hardcoded, so renaming either in the manifests
-# cannot leave these targets pointing somewhere else.
-NAMESPACE ?= $(shell sed -n 's/^  name: \(.*\)/\1/p' $(DEPLOY)/namespace.yaml | head -1)
-SECRET    ?= $(shell sed -n 's/^  ECOBEE_SECRET_NAME: "\(.*\)"/\1/p' $(DEPLOY)/configmap.yaml)
+# Read from the single place each value is defined, so these targets cannot point
+# somewhere the manifests do not.
+#
+# Both sources are read as flat text on purpose. An earlier version scraped
+# YAML with sed, which is brittle enough that it needed a guard for the case
+# where the pattern silently matched nothing:
+#   - the namespace is the `namespace:` field of kustomization.yaml, which is a
+#     single unambiguous line and the authority for the whole deployment;
+#   - the Secret name is a KEY=VALUE line in config.env, no YAML involved.
+NAMESPACE ?= $(shell awk '/^namespace:/{print $$2; exit}' $(DEPLOY)/kustomization.yaml)
+SECRET    ?= $(shell awk -F= '/^ECOBEE_SECRET_NAME=/{print $$2; exit}' $(DEPLOY)/config.env)
 CREDS     ?= ./credentials.json
 
 .DEFAULT_GOAL := help
@@ -114,9 +121,15 @@ check-derived:
 # Idempotent, and a dependency of `secret` on purpose: creating the Secret before
 # the namespace exists fails with "namespaces not found", which is a trap the
 # ordering of two hand-run commands should not be able to spring.
+#
+# Built from $(NAMESPACE) rather than applying namespace.yaml directly. That file
+# carries a literal name for the default deployment, but kustomize RENAMES it
+# from the `namespace:` field — so applying it raw after an override would create
+# the wrong namespace. `make deploy` applies the kustomize version (with labels)
+# immediately afterwards and reconciles this bare one.
 .PHONY: namespace
 namespace:
-	@kubectl apply -f $(DEPLOY)/namespace.yaml
+	@kubectl create namespace $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
 
 .PHONY: deploy
 deploy:

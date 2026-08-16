@@ -39,9 +39,11 @@ spec:
             - configMapRef:
                 name: ecobee-runtime-importer-config
           ports:
-            # Must match ECOBEE_METRICS_PORT in the ConfigMap. This is the one
-            # setting that appears in two places; changing it there alone gives
-            # a Service that points at nothing.
+            # The application's default port. ECOBEE_METRICS_PORT is deliberately
+            # absent from config.env so this number lives in exactly one place —
+            # a config file that can silently disagree with a manifest is the
+            # coupling this layout exists to remove. The Service targets the
+            # NAME, not the number, so it follows automatically.
             - name: metrics
               containerPort: 9863
           securityContext:
