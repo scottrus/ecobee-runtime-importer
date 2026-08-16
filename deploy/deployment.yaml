@@ -1,0 +1,66 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ecobee-runtime-importer
+  namespace: ecobee-runtime-importer
+  labels:
+    app.kubernetes.io/name: ecobee-runtime-importer
+spec:
+  # Exactly one. A second replica would be a second token writer, which is the
+  # one thing this design forbids — see ARCHITECTURE.md §4.2.
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate, for the same reason: a rollout must never
+    # have two pods refreshing tokens at once.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ecobee-runtime-importer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ecobee-runtime-importer
+    spec:
+      serviceAccountName: ecobee-runtime-importer
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: importer
+          image: ghcr.io/scottrus/ecobee-runtime-importer:0.1.0
+          imagePullPolicy: IfNotPresent
+          # All configuration comes from the ConfigMap, so adapting to a
+          # different shape does not mean editing this file. Adding a key there
+          # is enough — no matching entry is needed here.
+          envFrom:
+            - configMapRef:
+                name: ecobee-runtime-importer-config
+          ports:
+            # Must match ECOBEE_METRICS_PORT in the ConfigMap. This is the one
+            # setting that appears in two places; changing it there alone gives
+            # a Service that points at nothing.
+            - name: metrics
+              containerPort: 9863
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 192Mi
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          # No readinessProbe on purpose: nothing routes traffic to this pod,
+          # and marking it NotReady during an ecobee outage would gain nothing
+          # while hiding the metrics that explain the outage.

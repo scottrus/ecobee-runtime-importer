@@ -1,0 +1,14 @@
+# Credentials. bootstrap.py writes here when run locally; this file must never
+# reach a commit.
+credentials.json
+*.credentials.json
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.ruff_cache/

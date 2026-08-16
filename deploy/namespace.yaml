@@ -1,0 +1,14 @@
+---
+# The importer gets its own namespace rather than sharing a monitoring one.
+#
+# It holds a credential that it also WRITES (§4.3 of ARCHITECTURE.md), and its
+# ServiceAccount therefore has `patch` on a Secret. Keeping that in a dedicated
+# namespace means the blast radius of that grant is a namespace containing
+# nothing else, even though the Role is already scoped to a single Secret by
+# name.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ecobee-runtime-importer
+  labels:
+    app.kubernetes.io/name: ecobee-runtime-importer

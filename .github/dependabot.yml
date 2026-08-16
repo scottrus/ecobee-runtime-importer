@@ -1,0 +1,41 @@
+version: 2
+
+updates:
+  # Python runtime and dev dependencies.
+  #
+  # python-ecobee-api is deliberately NOT grouped with dev tooling. It owns the
+  # Auth0 login flow and this project calls one of its private methods, so its
+  # updates want reading rather than batching — see src/ecobee_importer/ecobee.py.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, python]
+    groups:
+      dev-tooling:
+        patterns: ["pytest*", "ruff", "pyyaml"]
+        update-types: [minor, patch]
+
+  # Base images. The Chainguard free tier publishes only `latest`, so the
+  # Dockerfile pins by digest -- this is what keeps those digests current, and is
+  # the only thing standing between us and a silently stale base image.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    labels: [dependencies, docker]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, ci]
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]

@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecobee-runtime-importer"
+version = "0.1.0"
+description = "Import ecobee runtimeReport history into VictoriaMetrics"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    "requests>=2.31,<3",
+    "prometheus-client>=0.20,<1",
+    # Pinned to a minor line deliberately. This project calls
+    # Ecobee._request_with_refresh, which owns ecobee's non-standard auth error
+    # mapping (HTTP 500 + status.code 14/1/16, not 401). Read the release notes
+    # before widening this constraint. See src/ecobee_importer/ecobee.py.
+    "python-ecobee-api>=0.4.1,<0.5",
+]
+
+[project.optional-dependencies]
+bootstrap = ["python-ecobee-api>=0.4.1,<0.5"]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+  "pyyaml>=6",
+]
+
+[project.scripts]
+ecobee-runtime-importer = "ecobee_importer.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/scottrus/ecobee-runtime-importer"
+Issues = "https://github.com/scottrus/ecobee-runtime-importer/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests read better with long literal fixture rows copied from real responses.
+"tests/*" = ["E501"]

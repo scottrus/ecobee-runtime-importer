@@ -1,0 +1,23 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Its own namespace, not a shared monitoring one: this workload's ServiceAccount
+# can `patch` a Secret, and isolating that keeps the grant's blast radius to a
+# namespace holding nothing else.
+#
+# Changing this one line moves the whole deployment. The importer resolves the
+# Secret's namespace from its own ServiceAccount mount, so nothing else needs
+# editing — and VMAgent/VMAlert in this cluster run selectAllByDefault: true, so
+# the VMServiceScrape and VMRule are still discovered from here.
+namespace: ecobee-runtime-importer
+
+# secret.example.yaml is deliberately NOT included. The Secret is created
+# out-of-band from scripts/bootstrap.py output and then rotated in place by the
+# importer; applying it from here would overwrite a live token with a stale one.
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml
+  - vmrule.yaml

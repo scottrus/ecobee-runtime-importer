@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# Default to read-only and grant per job. A blanket `contents: write` here would
+# hand the token write access to jobs that only build and scan.
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Gate: the tagged commit must be one that already passed full CI on main.
+  #
+  # Re-running lint and test here would be weaker than it looks -- it duplicates
+  # one of the four CI jobs while silently skipping manifests, docker, actionlint
+  # and the image scan, so a tag could publish an image whose manifests do not
+  # even render. Rather than copy every job into this workflow (and have the two
+  # drift), assert the invariant directly: this exact commit is on main, and CI
+  # succeeded on it.
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read     # to query CI runs for this commit
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # merge-base needs real history, not a shallow clone
+
+      - name: Tagged commit must be on main
+        run: |
+          set -euo pipefail
+          git fetch -q origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not an ancestor of origin/main."
+            echo "Releases are cut from main so that branch protection -- which"
+            echo "requires the CI checks -- is what stands behind the tag."
+            exit 1
+          fi
+          echo "$GITHUB_SHA is on main"
+
+      - name: CI must have succeeded on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Ask for successful CI runs against this exact SHA. Deriving the answer
+          # this way avoids hardcoding the required check names, which would drift
+          # the moment branch protection changed.
+          count=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success" \
+            --jq '.total_count')
+          if [ "$count" -lt 1 ]; then
+            echo "::error::No successful CI run found for ${GITHUB_SHA}."
+            echo "If CI is still running on this commit, wait for it and re-tag."
+            exit 1
+          fi
+          echo "found $count successful CI run(s) for this commit"
+
+  image:
+    name: Image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # push the image to GHCR
+      id-token: write        # OIDC token the attestation is signed against
+      attestations: write    # persist the attestation to the repo
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the tag matches the package and the deployed manifest
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/ecobee_importer/__init__.py)"
+          # The README's install path is `clone && kubectl apply -k deploy/`, so
+          # the manifest's pinned tag has to be the one this release publishes.
+          # Otherwise a fresh clone deploys some other build.
+          man="$(grep -oE 'image: ghcr\.io/[^:]+:[^ ]+' deploy/deployment.yaml | sed 's/.*://')"
+          echo "tag=$tag package=$pkg manifest=$man"
+          [ "$tag" = "$pkg" ] || { echo "::error::tag != __version__"; exit 1; }
+          [ "$tag" = "$man" ] || { echo "::error::tag != deploy/deployment.yaml image tag"; exit 1; }
+
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    name: GitHub release
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the GitHub release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Create the release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Container image
+
+            ```
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+
+            Digest: `${{ needs.image.outputs.digest }}`
+
+            ## Install
+
+            `deploy/` at this tag already pins this image, so there is nothing to
+            build:
+
+            ```bash
+            git clone --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git
+            cd ecobee-runtime-importer
+            uv venv --allow-existing && uv pip install -e '.[bootstrap,dev]'
+            .venv/bin/python scripts/bootstrap.py --out ./credentials.json
+            kubectl apply -f deploy/namespace.yaml
+            kubectl create secret generic ecobee-importer-tokens \
+              -n ecobee-runtime-importer \
+              --from-literal=refresh_token='<from bootstrap>'
+            kubectl apply -k deploy/
+            ```
+
+            Check `ECOBEE_VM_IMPORT_URL` in `deploy/configmap.yaml` first — it
+            defaults to a single-node VictoriaMetrics.
+
+            > The token Secret is **mutable state**. The importer rotates it in
+            > place, so after the first rotation the cluster's copy is
+            > authoritative — re-applying a saved copy will lock the account out
+            > and require a fresh interactive login.
