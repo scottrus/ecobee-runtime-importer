@@ -255,7 +255,25 @@ detects that status specifically and says which file disagrees. The namespace,
 by contrast, is not configured at all by default: it resolves from the pod's own
 ServiceAccount mount, so moving the workload needs no config change.
 
-### 4.4 When it does break
+### 4.4 An empty access token is not an expired one
+
+The Secret holds only `refresh_token` — the access token is short-lived and there is no
+reason to seed it — so a fresh pod always starts with no access token.
+
+**Calling ecobee with an empty bearer does not produce the "expired" path.** Status code
+14 is what makes `_request_with_refresh` refresh and retry; an empty token returns 1 or 16,
+"invalid", which maps to `InvalidTokenError` and is indistinguishable from a genuinely dead
+refresh token. The importer therefore reported `ecobee_reauth_required` against a
+credential minted seconds earlier, having never attempted a refresh at all.
+
+So the first request is preceded by an explicit refresh whenever no access token was
+loaded. The doomed call is not made.
+
+This is invisible from a `credentials.json`, which carries both tokens — every local run
+and every dry-run skipped the path entirely. The condition only exists where the
+credential comes from the Secret, which is to say only in the deployment.
+
+### 4.5 When it does break
 
 An `invalid_grant` is unrecoverable without a human. The process does **not** exit — it
 sets `ecobee_reauth_required 1`, keeps serving metrics, and keeps that alert firing until

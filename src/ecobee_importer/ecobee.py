@@ -52,7 +52,7 @@ class ReauthRequired(Exception):
     """Terminal authentication failure: a human must repeat the interactive login.
 
     Raised when the refresh token itself is rejected (`invalid_grant`). Nothing
-    the process can do recovers from this — see ARCHITECTURE.md §4.4.
+    the process can do recovers from this — see ARCHITECTURE.md §4.5.
     """
 
 
@@ -125,12 +125,39 @@ class EcobeeClient:
             _LOGGER.info("Refresh token was rotated by Auth0; persisting")
         self._store.save(self._tokens)
 
+    @property
+    def access_token(self) -> str:
+        return self._api.access_token or ""
+
+    def _ensure_access_token(self) -> None:
+        """Refresh first when no access token was loaded.
+
+        The Kubernetes Secret holds only `refresh_token` — the access token is
+        short-lived and there is no reason to seed it — so a fresh pod starts
+        with `access_token` empty. Calling the API with an empty bearer does NOT
+        return ecobee's "expired" status code 14, which is what makes
+        `_request_with_refresh` refresh and retry. It returns "invalid" (1 or
+        16), which maps to InvalidTokenError and is indistinguishable from a
+        genuinely dead refresh token.
+
+        So the importer reported `ecobee_reauth_required` against a credential
+        minted seconds earlier, having never once attempted a refresh. Doing the
+        refresh up front removes the doomed call entirely.
+
+        Not reproducible from a `credentials.json`, which carries both tokens —
+        the file store's access token meant local runs skipped this path.
+        """
+        if not self.access_token:
+            _LOGGER.info("No access token loaded; refreshing before first request")
+            self.refresh()
+
     def _call(self, endpoint: str, params: dict, what: str) -> Any:
         """Issue a request, mapping ecobee's auth errors onto our own.
 
         Token rotation is checked after every call because the helper may have
         refreshed internally.
         """
+        self._ensure_access_token()
         try:
             return self._api._request_with_refresh("GET", endpoint, what, params=params)
         except InvalidTokenError as err:
@@ -147,6 +174,7 @@ class EcobeeClient:
 
     def thermostats(self) -> list[Thermostat]:
         """Identifiers, display names and time zones. One request."""
+        self._ensure_access_token()
         try:
             self._api.get_thermostats()
         except InvalidTokenError as err:

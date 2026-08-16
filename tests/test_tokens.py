@@ -169,6 +169,42 @@ def test_empty_refresh_token_is_refused():
     assert store.saved == []
 
 
+# --- first-request behaviour ---------------------------------------------
+
+
+def test_empty_access_token_refreshes_before_the_first_request(monkeypatch):
+    """A Secret holds only refresh_token, so access_token starts empty.
+
+    Calling ecobee with an empty bearer returns status.code 1/16 ("invalid"),
+    NOT 14 ("expired") — so pyecobee's refresh-and-retry never fires and the
+    failure is indistinguishable from a dead refresh token. The importer must
+    refresh up front instead of making that doomed call.
+    """
+    client, store = client_with(access="")
+    called = []
+
+    def fake_refresh():
+        called.append(True)
+        client._api.access_token = "fresh"
+
+    monkeypatch.setattr(client._api, "refresh_tokens", fake_refresh)
+    client._ensure_access_token()
+
+    assert called, "an empty access token must trigger a refresh"
+    assert client.access_token == "fresh"
+
+
+def test_present_access_token_is_used_as_is(monkeypatch):
+    """No pointless refresh when a usable token was already loaded."""
+    client, _ = client_with(access="a1")
+    monkeypatch.setattr(
+        client._api,
+        "refresh_tokens",
+        lambda: pytest.fail("must not refresh with an access token present"),
+    )
+    client._ensure_access_token()
+
+
 # --- refresh path selection ----------------------------------------------
 
 
