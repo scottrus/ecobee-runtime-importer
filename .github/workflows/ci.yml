@@ -34,6 +34,9 @@ jobs:
         python-version: ["3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # setuptools-scm derives the version from tags; a shallow clone has none.
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -66,11 +69,15 @@ jobs:
       - name: Every action is SHA-pinned
         run: make actions-pinned
 
-  manifests:
-    name: Manifests
+  helm:
+    name: Helm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.3
 
       - name: Install kubeconform
         run: |
@@ -80,26 +87,18 @@ jobs:
           tar xzf kubeconform.tar.gz kubeconform
           sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
 
-      # Installed explicitly rather than relying on the runner's preinstalled
-      # kubectl: the Makefile falls back to `kubectl kustomize`, and a runner
-      # image change that dropped kubectl would silently turn REQUIRE_ALL=1 into
-      # a hard failure with a confusing message.
-      - name: Install kustomize
-        run: |
-          set -euo pipefail
-          curl -sSL -o kustomize.tar.gz \
-            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.7.1/kustomize_v5.7.1_linux_amd64.tar.gz
-          tar xzf kustomize.tar.gz kustomize
-          sudo install -m 0755 kustomize /usr/local/bin/kustomize
-
-      - name: Render, schema-check, and check the pinned image tag
-        run: make manifests
+      - name: Lint, template permutations, schema
+        run: make helm
 
   docker:
     name: Docker
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The smoke test compares the image's reported version against the one
+          # setuptools-scm derives here; both need the tag history.
+          fetch-depth: 0
 
       - name: Install hadolint
         run: |

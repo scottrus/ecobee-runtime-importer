@@ -1,33 +1,32 @@
----
-# Alerting rules for ecobee-runtime-importer.
-#
-# ⚠️ THIS WORKLOAD PRODUCES BOTH KINDS OF SERIES, AND THEY NEED OPPOSITE IDIOMS.
-#
-#    `ecobee_*` metrics ABOUT THE IMPORTER (reauth, cycles, watermarks) are
-#    SCRAPED from a long-lived process that holds its gauges between cycles.
-#    They never go stale, so bare instant selectors are correct. Do NOT wrap
-#    them in last_over_time() — doing so would silently widen every comparison
-#    window and defeat the staleness rule below.
-#
-#    `ecobee_*` metrics ABOUT THE HOUSE (temperatures, runtime seconds) are
-#    IMPORTED in 15-minute batches with historical timestamps. They ARE stale
-#    between imports, so a bare selector on them CANNOT FIRE reliably. Rules
-#    over those must use last_over_time().
-#
-#    Both statements are true. Check which kind a metric is before writing a
-#    rule against it.
-#
-# The only alert that needs a human is EcobeeReauthRequired. Everything else
-# self-heals: the importer catches up on its next cycle, and the report endpoint
-# serves up to 31 days retroactively, so a gap is recoverable rather than lost.
+{{/*
+⚠️ THIS WORKLOAD PRODUCES BOTH KINDS OF SERIES, AND THEY NEED OPPOSITE IDIOMS.
+
+   ecobee_* metrics ABOUT THE IMPORTER (reauth, cycles, watermarks) are SCRAPED
+   from a long-lived process that holds its gauges between cycles. They never go
+   stale, so bare instant selectors are correct. Do NOT wrap them in
+   last_over_time() — that would silently widen every comparison window and
+   defeat the staleness rule below.
+
+   ecobee_* metrics ABOUT THE HOUSE (temperatures, runtime seconds) are IMPORTED
+   in 15-minute batches with historical timestamps. They ARE stale between
+   imports, so a bare selector on them CANNOT FIRE reliably, and an instant query
+   against them returns empty even when the data is landing perfectly.
+
+   Both statements are true. Check which kind a metric is before writing a rule.
+
+The only alert that needs a human is EcobeeReauthRequired. Everything else
+self-heals: the importer catches up on its next cycle, and runtimeReport serves
+up to 31 days retroactively, so a gap is recoverable rather than lost.
+*/}}
+{{- if .Values.vmRule.enabled }}
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMRule
 metadata:
-  name: ecobee-runtime-importer
-  namespace: ecobee-runtime-importer
+  name: {{ include "ecobee.fullname" . }}
+  labels: {{- include "ecobee.labels" . | nindent 4 }}
 spec:
   groups:
-    - name: ecobee-runtime-importer
+    - name: {{ include "ecobee.fullname" . }}
       rules:
         - alert: EcobeeReauthRequired
           # SCRAPED metric — bare selector is correct.
@@ -39,13 +38,12 @@ spec:
             summary: ecobee refresh token rejected; collection has stopped
             description: >-
               The refresh token was rejected with invalid_grant. This cannot
-              self-heal: someone must re-run scripts/bootstrap.py with an
-              authenticator app and update the ecobee-importer-tokens Secret.
+              self-heal: run `make reauth`, or replace the Secret and the
+              importer will pick it up on its next cycle without a restart.
               History is not lost — runtimeReport serves up to 31 days
-              retroactively, so data is recoverable once auth is restored.
+              retroactively.
 
         - alert: EcobeeImportStale
-          # SCRAPED metric.
           expr: >-
             time() - ecobee_last_successful_import_timestamp_seconds > 3600
           for: 15m
@@ -56,10 +54,12 @@ spec:
             description: >-
               Cycles are running but not completing. Check
               ecobee_api_requests_total by outcome to separate an ecobee-side
-              failure from a VictoriaMetrics write failure.
+              failure from a write failure. A write that times out while ecobee
+              calls succeed usually means the destination's network policy does
+              not list this workload as a client.
 
         - alert: EcobeeImporterDown
-          expr: up{job=~".*ecobee-runtime-importer.*"} == 0
+          expr: up{job=~".*{{ include "ecobee.name" . }}.*"} == 0
           for: 15m
           labels:
             severity: warning
@@ -71,7 +71,7 @@ spec:
               not running.
 
         - alert: EcobeeThermostatReportingStale
-          # SCRAPED metric (a gauge about the newest bucket, not the bucket
+          # SCRAPED metric (a gauge ABOUT the newest bucket, not the bucket
           # itself), so no last_over_time() here either.
           expr: >-
             time() - ecobee_newest_bucket_timestamp_seconds > 7200
@@ -79,15 +79,15 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "{{ $labels.thermostat }} has not reported new data for 2h"
+            summary: "{{ `{{ $labels.thermostat }}` }} has not reported for 2h"
             description: >-
               Imports are succeeding for other thermostats, so this is the
               thermostat itself: offline, off Wi-Fi, or unpaired from the
               account.
 
-        # Example of the OTHER idiom, over an IMPORTED series. Kept as the
-        # reference for anyone adding house-data rules later. A bare selector
-        # here would be unable to fire between 15-minute imports.
+        # The OTHER idiom, over an IMPORTED series. Kept as the reference for
+        # anyone adding house-data rules later: a bare selector here would be
+        # unable to fire between 15-minute imports.
         - alert: EcobeeNoZoneTemperatureData
           expr: >-
             absent(last_over_time(ecobee_zone_temperature_fahrenheit[2h]))
@@ -99,3 +99,4 @@ spec:
             description: >-
               The importer may be healthy while writing nothing. Cross-check
               ecobee_samples_written_total.
+{{- end }}

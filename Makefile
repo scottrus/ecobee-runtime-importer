@@ -13,11 +13,12 @@ VENV   ?= .venv
 PY     ?= $(VENV)/bin/python
 PIP    ?= $(VENV)/bin/pip
 IMAGE  ?= ecobee-runtime-importer:dev
-DEPLOY ?= deploy
+CHART  ?= charts/ecobee-runtime-importer
+RELEASE   ?= ecobee-runtime-importer
 
-# Read from the package rather than duplicated here, so the smoke test asserts the
-# image really carries the version this working tree claims.
-VERSION := $(shell sed -n 's/^__version__ = "\(.*\)"/\1/p' src/ecobee_importer/__init__.py)
+# Derived by setuptools-scm from the git tag, read back out of the installed
+# package. No version literal exists in the tree to scrape.
+VERSION = $(shell $(PY) -c 'import ecobee_importer; print(ecobee_importer.__version__)' 2>/dev/null)
 
 # Read from the single place each value is defined, so these targets cannot point
 # somewhere the manifests do not.
@@ -28,8 +29,9 @@ VERSION := $(shell sed -n 's/^__version__ = "\(.*\)"/\1/p' src/ecobee_importer/_
 #   - the namespace is the `namespace:` field of kustomization.yaml, which is a
 #     single unambiguous line and the authority for the whole deployment;
 #   - the Secret name is a KEY=VALUE line in config.env, no YAML involved.
-NAMESPACE ?= $(shell awk '/^namespace:/{print $$2; exit}' $(DEPLOY)/kustomization.yaml)
-SECRET    ?= $(shell awk -F= '/^ECOBEE_SECRET_NAME=/{print $$2; exit}' $(DEPLOY)/config.env)
+NAMESPACE ?= ecobee-runtime-importer
+SECRET    ?= $(shell $(HELM_BIN) show values $(CHART) 2>/dev/null | awk '/^  existingSecret:/{print $$2; exit}')
+HELM_BIN  ?= helm
 CREDS     ?= ./credentials.json
 
 .DEFAULT_GOAL := help
@@ -59,7 +61,7 @@ help:
 	@echo "  make test            pytest"
 	@echo "  make actionlint      validate workflow syntax, expressions, run: blocks"
 	@echo "  make actions-pinned  every uses: is SHA-pinned with a version comment"
-	@echo "  make manifests       kustomize build, kubeconform, image-tag agreement"
+	@echo "  make helm            helm lint, template permutations, kubeconform"
 	@echo "  make docker          hadolint, image build, smoke test"
 	@echo "  make scan            grype CVE scan (run 'make docker' first)"
 	@echo
@@ -113,27 +115,27 @@ bootstrap: setup
 # that made the importer request secrets at cluster scope, so it is checked.
 .PHONY: check-derived
 check-derived:
-	@test -n "$(NAMESPACE)" || { \
-		echo "ERROR: could not read the namespace from $(DEPLOY)/namespace.yaml"; exit 1; }
+	@test -n "$(NAMESPACE)" || { echo "ERROR: NAMESPACE is empty"; exit 1; }
 	@test -n "$(SECRET)" || { \
-		echo "ERROR: could not read ECOBEE_SECRET_NAME from $(DEPLOY)/configmap.yaml"; exit 1; }
+		echo "ERROR: could not read credentials.existingSecret from $(CHART)/values.yaml"; exit 1; }
 
 # Idempotent, and a dependency of `secret` on purpose: creating the Secret before
 # the namespace exists fails with "namespaces not found", which is a trap the
 # ordering of two hand-run commands should not be able to spring.
 #
-# Built from $(NAMESPACE) rather than applying namespace.yaml directly. That file
-# carries a literal name for the default deployment, but kustomize RENAMES it
-# from the `namespace:` field — so applying it raw after an override would create
-# the wrong namespace. `make deploy` applies the kustomize version (with labels)
-# immediately afterwards and reconciles this bare one.
+# `helm upgrade --install --create-namespace` would also make it, but the Secret
+# has to exist BEFORE the first install or the pod crash-loops on a missing
+# credential — so the namespace is created here, ahead of it.
 .PHONY: namespace
 namespace:
 	@kubectl create namespace $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
 
 .PHONY: deploy
-deploy:
-	@kubectl apply -k $(DEPLOY)/
+deploy: check-derived
+	@$(HELM_BIN) upgrade --install $(RELEASE) $(CHART) \
+		--namespace $(NAMESPACE) --create-namespace \
+		--set fullnameOverride=$(RELEASE) \
+		$(HELM_ARGS)
 
 .PHONY: secret
 secret: check-derived namespace
@@ -150,7 +152,7 @@ secret: check-derived namespace
 
 .PHONY: restart
 restart: check-derived
-	@kubectl rollout restart deploy/ecobee-runtime-importer -n $(NAMESPACE)
+	@kubectl rollout restart deploy/$(RELEASE) -n $(NAMESPACE)
 
 # Full recovery from ecobee_reauth_required, in one step.
 #
@@ -208,66 +210,62 @@ actions-pinned:
 	fi; \
 	echo "    all uses: are SHA-pinned with a version comment"
 
-# ------------------------------------------------------------- manifests ----
+# ------------------------------------------------------------------ helm ----
 
-.PHONY: manifests
-manifests: manifests-build manifests-schema manifests-image
+.PHONY: helm
+helm: helm-lint helm-template helm-schema
 
-# `kubectl kustomize` and the standalone `kustomize` are equivalent here; accept
-# either so this works on a laptop with only one of them.
-KUSTOMIZE := $(shell command -v kustomize 2>/dev/null || echo "")
-KUBECTL   := $(shell command -v kubectl 2>/dev/null || echo "")
-
-define render
-if [ -n "$(KUSTOMIZE)" ]; then kustomize build $(DEPLOY); \
-elif [ -n "$(KUBECTL)" ]; then kubectl kustomize $(DEPLOY); \
-else exit 127; fi
-endef
-
-.PHONY: manifests-build
-manifests-build:
-	@if [ -z "$(KUSTOMIZE)$(KUBECTL)" ]; then $(call missing,kustomize,kustomize build); else \
-		set -e; echo "==> kustomize build"; \
-		$(render) > /tmp/eri-manifests.yaml; \
-		for kind in Namespace ConfigMap ServiceAccount Role RoleBinding Deployment Service VMServiceScrape VMRule; do \
-			grep -q "^kind: $$kind$$" /tmp/eri-manifests.yaml \
-				|| { echo "FAIL: $$kind missing from the rendered output"; exit 1; }; \
-		done; \
-		if grep -q "^kind: Secret$$" /tmp/eri-manifests.yaml; then \
-			echo "FAIL: a Secret rendered. The token Secret is created out-of-band and"; \
-			echo "      rotated in place by the importer -- applying one from the repo"; \
-			echo "      would overwrite a live token with a stale one."; exit 1; fi; \
-		grep -q "replicas: 1" /tmp/eri-manifests.yaml \
-			|| { echo "FAIL: replicas must be 1 -- a second replica is a second token writer"; exit 1; }; \
-		grep -q "type: Recreate" /tmp/eri-manifests.yaml \
-			|| { echo "FAIL: strategy must be Recreate, so a rollout never runs two token writers"; exit 1; }; \
-		echo "    all expected kinds rendered, no Secret, single writer preserved"; \
+.PHONY: helm-lint
+helm-lint:
+	@if ! command -v $(HELM_BIN) >/dev/null 2>&1; then $(call missing,helm,helm lint); else \
+		echo "==> helm lint"; $(HELM_BIN) lint $(CHART); \
 	fi
 
-.PHONY: manifests-schema
-manifests-schema:
-	@if [ -z "$(KUSTOMIZE)$(KUBECTL)" ]; then $(call missing,kustomize,kubeconform); \
+# Permutations, not just a default render. Each assertion below is a property the
+# deployment depends on and that a template edit could silently break.
+.PHONY: helm-template
+helm-template:
+	@if ! command -v $(HELM_BIN) >/dev/null 2>&1; then $(call missing,helm,helm template); else \
+		set -e; echo "==> helm template permutations"; \
+		$(HELM_BIN) template t $(CHART) > /tmp/eri-default.yaml; \
+		if grep -q "^kind: Secret" /tmp/eri-default.yaml; then \
+			echo "FAIL: the chart rendered a Secret."; \
+			echo "      The importer ROTATES its credential Secret in place, so a"; \
+			echo "      Helm-managed one would be reset on every upgrade, presenting"; \
+			echo "      a revoked token and locking the account out."; exit 1; fi; \
+		grep -q "replicas: 1" /tmp/eri-default.yaml \
+			|| { echo "FAIL: replicas must be 1 — a second replica is a second token writer"; exit 1; }; \
+		grep -q "type: Recreate" /tmp/eri-default.yaml \
+			|| { echo "FAIL: strategy must be Recreate, so a rollout never runs two token writers"; exit 1; }; \
+		grep -q "checksum/config" /tmp/eri-default.yaml \
+			|| { echo "FAIL: no config checksum — a values change would not restart the pod"; exit 1; }; \
+		secret=$$($(HELM_BIN) template t $(CHART) --set credentials.existingSecret=other-name); \
+		echo "$$secret" | grep -q 'resourceNames: \["other-name"\]' \
+			|| { echo "FAIL: the Role's resourceNames did not follow credentials.existingSecret"; exit 1; }; \
+		echo "$$secret" | grep -q 'ECOBEE_SECRET_NAME: "other-name"' \
+			|| { echo "FAIL: ECOBEE_SECRET_NAME did not follow credentials.existingSecret"; exit 1; }; \
+		port=$$($(HELM_BIN) template t $(CHART) --set service.port=9999); \
+		echo "$$port" | grep -q "containerPort: 9999" \
+			|| { echo "FAIL: containerPort did not follow service.port"; exit 1; }; \
+		echo "$$port" | grep -q 'ECOBEE_METRICS_PORT: "9999"' \
+			|| { echo "FAIL: ECOBEE_METRICS_PORT did not follow service.port"; exit 1; }; \
+		$(HELM_BIN) template t $(CHART) --set rbac.create=false | grep -q "kind: Role" \
+			&& { echo "FAIL: rbac.create=false still rendered a Role"; exit 1; } || true; \
+		echo "    all permutations rendered as expected"; \
+	fi
+
+.PHONY: helm-schema
+helm-schema:
+	@if ! command -v $(HELM_BIN) >/dev/null 2>&1; then $(call missing,helm,kubeconform); \
 	elif ! command -v kubeconform >/dev/null 2>&1; then \
 		$(call missing,kubeconform,kubeconform); \
 		echo "     install with: brew install kubeconform"; \
 	else \
-		set -e; echo "==> kubeconform"; \
-		$(render) | kubeconform -strict -summary -schema-location default \
-			-skip VMServiceScrape,VMRule; \
+		echo "==> kubeconform"; \
+		$(HELM_BIN) template t $(CHART) \
+			| kubeconform -strict -summary -schema-location default \
+				-skip VMServiceScrape,VMRule,ServiceMonitor; \
 	fi
-
-# The README tells people to clone and `kubectl apply -k deploy/` against a
-# published image. That only works if the manifest names a tag the release
-# workflow actually pushed, so the two must agree in the working tree.
-.PHONY: manifests-image
-manifests-image:
-	@echo "==> deployment image tag matches the package version"
-	@tag=$$(grep -oE 'image: ghcr\.io/[^:]+:[^ ]+' $(DEPLOY)/deployment.yaml | sed 's/.*://'); \
-	if [ "$$tag" != "$(VERSION)" ]; then \
-		echo "FAIL: deploy/deployment.yaml pins :$$tag but the package is $(VERSION)."; \
-		echo "      A clone would deploy a different build than this tree."; exit 1; \
-	fi; \
-	echo "    both are $(VERSION)"
 
 # ---------------------------------------------------------------- docker ----
 
@@ -283,7 +281,9 @@ docker-lint:
 .PHONY: docker-build
 docker-build:
 	@if ! command -v docker >/dev/null 2>&1; then $(call missing,docker,docker build); else \
-		set -e; echo "==> docker build"; docker build $(DOCKER_BUILD_ARGS) -t $(IMAGE) .; \
+		set -e; echo "==> docker build"; \
+		docker build --build-arg SETUPTOOLS_SCM_PRETEND_VERSION="$(VERSION)" \
+			$(DOCKER_BUILD_ARGS) -t $(IMAGE) .; \
 	fi
 
 .PHONY: docker-smoke
@@ -324,7 +324,7 @@ scan:
 # ----------------------------------------------------------------- gates ----
 
 .PHONY: check
-check: lint actionlint actions-pinned test manifests docker
+check: lint actionlint actions-pinned test helm docker
 	@echo
 	@echo "All available checks passed."
 	@if [ -z "$(REQUIRE_ALL)" ]; then \

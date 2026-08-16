@@ -1,10 +1,16 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ecobee-runtime-importer"
-version = "0.1.0"
+# Derived from the git tag by setuptools-scm — never committed, so no pull
+# request has to predict the next release number. Local trees get a dev version
+# like 0.1.4.dev3+g9e3b566; release builds pass SETUPTOOLS_SCM_PRETEND_VERSION.
+#
+# This file previously said 0.1.0 while __init__.py said 0.1.4. Nothing compared
+# them, so the drift was invisible.
+dynamic = ["version"]
 description = "Import ecobee runtimeReport history into VictoriaMetrics"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -40,6 +46,8 @@ ecobee-runtime-importer = "ecobee_importer.__main__:main"
 [project.urls]
 Homepage = "https://github.com/scottrus/ecobee-runtime-importer"
 Issues = "https://github.com/scottrus/ecobee-runtime-importer/issues"
+
+[tool.setuptools_scm]
 
 [tool.setuptools.packages.find]
 where = ["src"]

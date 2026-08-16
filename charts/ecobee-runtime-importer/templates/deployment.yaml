@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ecobee.fullname" . }}
+  labels: {{- include "ecobee.labels" . | nindent 4 }}
+spec:
+  {{/* Never more than one: a second replica is a second token writer, and the
+       loser of an Auth0 rotation race needs an interactive login to recover. */}}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "ecobee.selectorLabels" . | nindent 6 }}
+  strategy:
+    {{/* Recreate, not RollingUpdate, for the same reason: a rollout must never
+         overlap two processes that both write the credential Secret. */}}
+    type: Recreate
+  template:
+    metadata:
+      labels: {{- include "ecobee.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{/* Without this a ConfigMap edit leaves the running process on the old
+             values, because env is read once at container start. */}}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "ecobee.serviceAccountName" . }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: importer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "ecobee.fullname" . }}
+          ports:
+            {{/* Both this and ECOBEE_METRICS_PORT come from .Values.service.port,
+                 so they cannot disagree. The Service targets the NAME. */}}
+            - name: metrics
+              containerPort: {{ .Values.service.port }}
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          {{/* No readinessProbe on purpose: nothing routes traffic here, and
+               marking the pod NotReady during an ecobee outage would gain
+               nothing while hiding the metrics that explain the outage. */}}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

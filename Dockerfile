@@ -30,6 +30,13 @@ ENV PATH="/venv/bin:$PATH"
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
 
+# setuptools-scm derives the version from git, and the build context has no .git
+# — copying it in would bloat every layer and still break for a tarball build.
+# The release workflow passes the tag; local builds get a placeholder, which is
+# why a locally built image reports 0.0.0 rather than lying about a release.
+ARG SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
+
 RUN pip install --no-cache-dir .
 
 # Drop back to nonroot so this stage does not end as root. The stage is discarded

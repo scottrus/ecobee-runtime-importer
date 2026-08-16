@@ -1,0 +1,147 @@
+# Default values for ecobee-runtime-importer.
+
+# Exactly one. A second replica is a second token writer, and Auth0 rotates the
+# refresh token — the loser of that race gets an invalid_grant and the account
+# needs an interactive login to recover. The Deployment also uses the Recreate
+# strategy so a rollout never overlaps two writers.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/scottrus/ecobee-runtime-importer
+  # Empty means "use the chart's appVersion", which the release workflow sets
+  # from the git tag. Override only to pin a different build.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ============================================================================
+# CREDENTIALS
+#
+# ⚠️ THE SECRET IS NEVER TEMPLATED BY THIS CHART, AND THAT IS DELIBERATE.
+#
+#    The importer WRITES this Secret: Auth0 rotates the refresh token and the
+#    new value is patched back in place. A Helm-managed Secret would be reset to
+#    whatever this file says on every `helm upgrade`, presenting a revoked token
+#    and locking the account out until someone repeats the interactive login
+#    with an authenticator app.
+#
+#    Create it out of band — `make secret` does this — and name it here.
+# ============================================================================
+credentials:
+  # Name of the pre-existing Secret holding `refresh_token`. Its name also
+  # becomes the Role's resourceNames entry, so the RBAC grant follows it.
+  existingSecret: ecobee-importer-tokens
+  # Leave empty to resolve the pod's own namespace at runtime, which is almost
+  # always right. Setting it requires a ClusterRole instead, which this chart
+  # does not render.
+  namespace: ""
+
+rbac:
+  # Grants get + patch on the ONE Secret named above, by resourceNames. Without
+  # that scoping, `patch` on secrets means every secret in the namespace.
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+
+# ============================================================================
+# DESTINATION
+# ============================================================================
+victoriaMetrics:
+  # The importer writes samples with their ORIGINAL timestamps, so this is the
+  # import endpoint, not a remote-write one.
+  #
+  # Use a fully qualified name. The importer usually runs in its own namespace
+  # and a bare service name will not resolve across that boundary.
+  #
+  #   single-node  http://vmsingle-<release>.<ns>.svc.cluster.local:8428/api/v1/import/prometheus
+  #   cluster      http://vminsert.<ns>.svc.cluster.local:8480/insert/0/prometheus/api/v1/import/prometheus
+  url: http://victoriametrics:8428/api/v1/import/prometheus
+  writeTimeoutSeconds: 60
+  # Path to a mounted file whose contents become the Authorization header. A
+  # path, not a value, so the credential can come from a Secret and never enter
+  # values.yaml. Re-read per write, so rotation needs no restart.
+  authHeaderFile: ""
+
+# ============================================================================
+# PACING
+#
+# ecobee's documentation: "DO NOT request report data at an interval quicker
+# than once every 15 minutes." 900 is the floor and the importer clamps lower
+# values rather than honouring them.
+# ============================================================================
+importIntervalSeconds: 900
+# Re-imported on every restart. Idempotent, and it is what removes the need for
+# any persisted watermark. Capped at the API's 31-day report limit.
+startupLookbackHours: 24
+# Re-request this much before the watermark each cycle, so late-arriving and
+# revised buckets are picked up.
+overlapMinutes: 60
+thermostatCacheSeconds: 3600
+
+# ============================================================================
+# COLLECTION
+# ============================================================================
+collection:
+  includeSensors: true
+  # Adds to the default column set.
+  extraColumns: []
+  # Replaces the default column set entirely. Wins over extraColumns.
+  columns: []
+  # Static labels on every sample, for estates running more than one instance
+  # against more than one ecobee account. Reserved label names are rejected at
+  # startup.
+  extraLabels: {}
+
+logLevel: INFO
+
+# ============================================================================
+# SERVICE AND SCRAPING
+#
+# This endpoint serves the importer's OWN health only — reauth state, cycle
+# counts, watermarks. House data never appears here; it goes straight to
+# VictoriaMetrics with its original timestamps.
+# ============================================================================
+service:
+  port: 9863
+
+vmServiceScrape:
+  enabled: true
+  # 60s despite a 15-minute import interval, and that is not a mismatch:
+  # scraping costs nothing and it is what gives `up` and the staleness gauges
+  # useful resolution. The gauges simply repeat between cycles.
+  interval: 60s
+
+serviceMonitor:
+  enabled: false
+
+# Alerting rules. The only one that needs a human is EcobeeReauthRequired.
+vmRule:
+  enabled: true
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 192Mi

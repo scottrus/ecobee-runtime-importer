@@ -1,0 +1,44 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "ecobee.serviceAccountName" . }}
+  labels: {{- include "ecobee.labels" . | nindent 4 }}
+{{- end }}
+{{- if .Values.rbac.create }}
+---
+{{/*
+The importer is the single writer of the token Secret. Auth0 rotates the refresh
+token on refresh, and a rotated value that is never persisted locks the account
+out on the next restart — so this workload needs write access to exactly one
+Secret, and nothing else.
+
+`resourceNames` is what keeps that narrow: without it, `patch` on secrets is
+patch on EVERY secret in the namespace. The name comes from the same value the
+importer is configured with, so the grant cannot drift from the Secret it covers.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "ecobee.fullname" . }}-tokens
+  labels: {{- include "ecobee.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ include "ecobee.secretName" . | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "ecobee.fullname" . }}-tokens
+  labels: {{- include "ecobee.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "ecobee.fullname" . }}-tokens
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ecobee.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
