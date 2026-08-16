@@ -156,24 +156,11 @@ jobs:
             ## Install
 
             `deploy/` at this tag already pins this image, so there is nothing to
-            build:
+            build. Follow the four steps in the
+            [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md#setup)
+            — it is the authoritative source for setup, and duplicating it here
+            is how the two drift.
 
             ```bash
             git clone --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git
-            cd ecobee-runtime-importer
-            uv venv --allow-existing && uv pip install -e '.[bootstrap,dev]'
-            .venv/bin/python scripts/bootstrap.py --out ./credentials.json
-            kubectl apply -f deploy/namespace.yaml
-            kubectl create secret generic ecobee-importer-tokens \
-              -n ecobee-runtime-importer \
-              --from-literal=refresh_token='<from bootstrap>'
-            kubectl apply -k deploy/
             ```
-
-            Check `ECOBEE_VM_IMPORT_URL` in `deploy/configmap.yaml` first — it
-            defaults to a single-node VictoriaMetrics.
-
-            > The token Secret is **mutable state**. The importer rotates it in
-            > place, so after the first rotation the cluster's copy is
-            > authoritative — re-applying a saved copy will lock the account out
-            > and require a fresh interactive login.

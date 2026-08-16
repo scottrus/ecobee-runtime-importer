@@ -60,6 +60,32 @@ def test_file_store_omits_empty_api_key(tmp_path):
     assert "api_key" not in json.loads(path.read_text())
 
 
+def test_placeholder_token_is_rejected_at_load(tmp_path):
+    """A Secret made from the README's placeholder must fail immediately.
+
+    kubectl accepts `--from-literal=refresh_token='PASTE_HERE'` without
+    complaint, and without this guard the first sign of trouble is an
+    invalid_grant an hour later that reads like a revoked token.
+    """
+    path = tmp_path / "credentials.json"
+    path.write_text(json.dumps({"refresh_token": "PASTE_HERE"}))
+    with pytest.raises(ValueError, match="placeholder"):
+        FileTokenStore(str(path)).load()
+
+
+def test_placeholder_check_is_case_and_space_insensitive(tmp_path):
+    path = tmp_path / "credentials.json"
+    path.write_text(json.dumps({"refresh_token": "  Replace_Me  "}))
+    with pytest.raises(ValueError, match="placeholder"):
+        FileTokenStore(str(path)).load()
+
+
+def test_a_real_looking_token_is_accepted(tmp_path):
+    path = tmp_path / "credentials.json"
+    path.write_text(json.dumps({"refresh_token": "v1.MRlDqZ9nOtARealLookingToken"}))
+    assert FileTokenStore(str(path)).load().refresh_token.startswith("v1.")
+
+
 def test_redacted_never_contains_the_token():
     described = Tokens(
         refresh_token="super-secret", access_token="also-secret"

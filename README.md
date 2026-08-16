@@ -66,26 +66,31 @@ app. This step cannot be automated — that is why it is a script you run rather
 than a job that runs.
 
 ```bash
-uv venv --allow-existing && uv pip install -e '.[bootstrap,dev]'
+make setup
 ```
 
 ```bash
-.venv/bin/python scripts/bootstrap.py --out ./credentials.json
+.venv/bin/python scripts/bootstrap.py
 ```
+
+`make setup` uses `uv` when it is installed and falls back to the stdlib `venv`
+otherwise, so this works on a machine that has neither. On Debian and Ubuntu the
+fallback needs `python3-venv` (`apt install python3-venv`) if `python3 -m venv`
+reports that `ensurepip` is unavailable.
 
 It prompts for your email, then your password (not echoed), then a 6-digit code
 if your account has TOTP MFA. Push, SMS and email MFA are not supported — only
 authenticator-app codes.
 
-`--out` writes the token to a 0600 file rather than printing it, keeping it out
-of your terminal scrollback. Omit it to print instead. `credentials.json` is
-gitignored.
+It writes `./credentials.json` at mode 0600 and stops there. The token stays out
+of your scrollback, and the file is gitignored. (`--out PATH` moves it;
+`--print` puts it on stdout instead, which you rarely want.)
 
 Your password is used only to complete this login. It is never stored and never
 reaches the running importer.
 
-Put the `refresh_token` in your password manager, then read it back out for the
-next step:
+Put the `refresh_token` in your password manager — this is your only copy until
+the Secret exists:
 
 ```bash
 .venv/bin/python -c 'import json;print(json.load(open("credentials.json"))["refresh_token"])'
@@ -102,7 +107,13 @@ kubectl apply -f deploy/namespace.yaml
 ```
 
 ```bash
-kubectl create secret generic ecobee-importer-tokens -n ecobee-runtime-importer --from-literal=refresh_token='PASTE_HERE'
+kubectl create secret generic ecobee-importer-tokens -n ecobee-runtime-importer --from-literal=refresh_token="$(.venv/bin/python -c 'import json;print(json.load(open("credentials.json"))["refresh_token"])')"
+```
+
+Then delete the local copy — the cluster's is authoritative from here:
+
+```bash
+rm credentials.json
 ```
 
 > **This Secret becomes mutable state.** Auth0 may rotate the refresh token, and

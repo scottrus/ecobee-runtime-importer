@@ -29,6 +29,32 @@ KEY_ACCESS = "access_token"
 KEY_REFRESH = "refresh_token"
 KEY_API = "api_key"
 
+# Placeholders that documentation and examples have used. A Secret created with
+# one of these is accepted by kubectl without complaint and only fails much
+# later, as an `invalid_grant` that reads like a revoked token rather than one
+# that was never real. Naming them here turns that into an immediate, obvious
+# startup error.
+PLACEHOLDERS = frozenset(
+    {
+        "paste_here",
+        "paste_token_here",
+        "replace_me",
+        "<value>",
+        "<from bootstrap>",
+        "changeme",
+        "todo",
+    }
+)
+
+
+def reject_placeholder(value: str, source: str) -> None:
+    if value.strip().lower() in PLACEHOLDERS:
+        raise ValueError(
+            f"{source} contains the placeholder {value.strip()!r}, not a real "
+            f"refresh token. Re-create it from the credentials file that "
+            f"scripts/bootstrap.py wrote — see step 2 of the README."
+        )
+
 
 @dataclass
 class Tokens:
@@ -67,6 +93,7 @@ class FileTokenStore:
         refresh = data.get(KEY_REFRESH, "")
         if not refresh:
             raise ValueError(f"{self.path} has no {KEY_REFRESH!r}")
+        reject_placeholder(refresh, str(self.path))
         return Tokens(
             refresh_token=refresh,
             access_token=data.get(KEY_ACCESS, ""),
@@ -168,6 +195,7 @@ class KubernetesSecretStore:
                 f"Expected keys: {KEY_REFRESH}, {KEY_ACCESS} (optional), "
                 f"{KEY_API} (optional)."
             )
+        reject_placeholder(refresh, f"Secret {self.namespace}/{self.name}")
         return Tokens(
             refresh_token=refresh,
             access_token=decode(KEY_ACCESS),
