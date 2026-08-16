@@ -315,7 +315,25 @@ lookback are handled by raising it or by a one-off `--backfill-from` run.
 
 **Deliberate overlap.** Each cycle re-requests `ECOBEE_OVERLAP_MINUTES` (default 60)
 before the watermark. ecobee fills in late and occasionally revises recent buckets; the
-overlap picks those corrections up. Re-importing an identical sample is a no-op.
+overlap picks those corrections up.
+
+**Re-importing an identical sample is NOT free**, which an earlier version of this
+document asserted. VictoriaMetrics stores duplicate samples unless deduplication is
+configured, and raw-sample functions then over-count: with a 60-minute overlap and a
+15-minute interval every bucket is offered four times, so `count_over_time` and
+`sum_over_time` inflated ~4x. Measured on real data, that read as **50 hours of
+compressor runtime in a 24-hour day** — the impossible number is what makes it
+detectable, and a subtler ratio would not have been.
+
+So the importer keeps the overlap and sends only what is new or **whose value has
+changed**. Suppressing on presence rather than value would discard exactly the
+revisions the overlap exists to collect. `ecobee_samples_skipped_total` counts the
+suppressed writes.
+
+The cache is in memory, so a restart re-writes its lookback window. That is the same
+trade as the watermark (§5): persisting it would reintroduce a state-corruption class,
+and restarts are rare. It is also why queries over history that spans restarts should
+still prefer `sum_over_time(last_over_time(...)[...])` over the raw form.
 
 **The loop never exits on error.** Transient failures are counted, logged, and retried on
 the next cycle. Only invalid configuration at startup is fatal. This is what keeps the
