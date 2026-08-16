@@ -23,7 +23,7 @@ Design rationale, failure modes and the traps in ecobee's data are in
 
 | Metric | |
 |---|---|
-| `ecobee_zone_temperature_fahrenheit` | per thermostat |
+| `ecobee_zone_temperature_fahrenheit` | per thermostat — the zone **average**, not one sensor |
 | `ecobee_zone_humidity_percent` | per thermostat (**not** per room — see below) |
 | `ecobee_zone_heat_setpoint_fahrenheit` / `..._cool_...` | per thermostat |
 | `ecobee_zone_occupancy` | per thermostat |
@@ -66,6 +66,15 @@ because duplicates carry identical values.
 everything else. This contradicts the widely repeated claim that they are
 invisible to the ecobee API — that claim is true of `GET /1/thermostat`, which is
 where people look, but not of `runtimeReport`.
+
+**`ecobee_zone_temperature_fahrenheit` is an average**, across whichever sensors
+participate in the zone — it comes from `zoneAveTemp`. Measured 0.3–1.2 °F from
+the thermostat's own reading. Use it to compare against setpoints, since it is
+what the thermostat controls against; use
+`ecobee_sensor_temperature_fahrenheit{sensor_id="ei:0:1"}` when you want the
+temperature at the thermostat itself. Pairing the zone average with
+`ecobee_zone_humidity_percent` — which is measured at a single point — is the
+common way to get a subtly wrong dewpoint. ARCHITECTURE.md §3.3 has the detail.
 
 **There is no per-room humidity.** Room SmartSensors measure temperature and
 occupancy; humidity is measured only at the thermostats themselves. Room-level

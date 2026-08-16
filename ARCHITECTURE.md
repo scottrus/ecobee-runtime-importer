@@ -165,7 +165,7 @@ No scaling is applied to any value.
 
 | Metric | Source | Notes |
 |---|---|---|
-| `ecobee_zone_temperature_fahrenheit` | `zoneAveTemp` | |
+| `ecobee_zone_temperature_fahrenheit` | `zoneAveTemp` | the zone **average**, not one sensor — see below |
 | `ecobee_zone_humidity_percent` | `zoneHumidity` | |
 | `ecobee_zone_heat_setpoint_fahrenheit` | `zoneHeatTemp` | |
 | `ecobee_zone_cool_setpoint_fahrenheit` | `zoneCoolTemp` | |
@@ -186,6 +186,27 @@ carry `sensor`, `sensor_type` and `sensor_usage`.
 
 `ecobee_equipment_runtime_seconds` is a **gauge of seconds per bucket**, not a counter.
 Duty cycle is `ecobee_equipment_runtime_seconds / 300`. Do not wrap it in `rate()`.
+
+**`zoneAveTemp` is an average across participating sensors, not a thermostat reading.**
+The name says so and the metric name hides it. Measured on a live account, the zone value
+sits 0.3–1.2 °F away from the thermostat's own sensor. The two are different quantities and
+each is right for a different question:
+
+| Question | Use |
+|---|---|
+| What is the thermostat controlling against? | `ecobee_zone_temperature_fahrenheit` — the setpoint comparison is only meaningful against the value the thermostat acts on |
+| What is the temperature *at* the thermostat? | `ecobee_sensor_temperature_fahrenheit{sensor_id="ei:0:1"}` |
+| What is the temperature in room X? | the `ecobee_sensor_temperature_fahrenheit` series for that sensor |
+
+This matters most for **dewpoint**, which pairs temperature with humidity. `zoneHumidity` is
+measured at the thermostat — it matches the `ei:0:2` sensor exactly — so combining it with
+the zone *average* temperature pairs a single-point humidity with a multi-point
+temperature. Use the thermostat's own sensor for both, or accept an error that grows with
+how much the rooms disagree.
+
+Remote sensor IDs follow `deviceName:deviceId:sensorId`. The thermostat's own sensors
+appear as the equipment interface — `ei:0:1` temperature, `ei:0:2` humidity — while remote
+SmartSensors appear as `rs:`/`rs2:` and door/window contacts as `dw:`.
 
 **There is no per-room humidity.** Remote SmartSensors measure temperature and occupancy;
 humidity is measured only at the thermostats themselves. Room-level dewpoint analysis is
