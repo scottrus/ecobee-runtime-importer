@@ -154,9 +154,7 @@ def test_samples_are_streamed_not_materialised():
 
     from ecobee_importer.transform import all_samples, iter_all_samples
 
-    moments = [
-        datetime.now(UTC) - timedelta(minutes=5 * i) for i in range(1, 2000)
-    ]
+    moments = [datetime.now(UTC) - timedelta(minutes=5 * i) for i in range(1, 2000)]
     report = report_at(moments)
     names = {IDENT: "Basement"}
     zones = {IDENT: "America/New_York"}
