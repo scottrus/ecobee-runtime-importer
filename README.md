@@ -53,7 +53,13 @@ dewpoint analysis is limited to those locations.
 
 ## Setup
 
-Four steps: clone, bootstrap a token, create the namespace and Secret, deploy.
+Four steps: clone, bootstrap a token, create the Secret, deploy with Helm.
+
+The clone and the `make` targets exist for one reason: **the credential Secret is
+not managed by Helm.** The importer rotates the refresh token in place, so a
+Helm-templated Secret would be reset on every upgrade. Minting and replacing that
+token is a local, interactive job — that is what the Makefile automates.
+Deployment itself is plain `helm`.
 
 ```bash
 git clone https://github.com/scottrus/ecobee-runtime-importer.git && cd ecobee-runtime-importer
@@ -119,21 +125,43 @@ rm credentials.json
 
 ### 3. Deploy
 
-Nothing to build. `deploy/` pins a published image, and every tagged release
-pushes a multi-arch build to GHCR with an SBOM and a signed provenance
-attestation.
-
-**Check `ECOBEE_VM_IMPORT_URL` in `deploy/config.env` first.** The importer runs
-in its own namespace, so a bare service name will not resolve — the destination
-needs a fully qualified name:
-
-```
-http://vmsingle-<release>.<namespace>.svc.cluster.local:8428/api/v1/import/prometheus
-```
+Nothing to build. Every tagged release publishes a multi-arch image and a
+versioned Helm chart to GHCR, with an SBOM and a signed provenance attestation.
 
 ```bash
-make deploy
+helm upgrade --install ecobee-runtime-importer \
+  oci://ghcr.io/scottrus/charts/ecobee-runtime-importer \
+  --version 0.1.5 \
+  --namespace ecobee-runtime-importer --create-namespace \
+  --set fullnameOverride=ecobee-runtime-importer \
+  --set victoriaMetrics.url=http://vmsingle-vmks-victoria-metrics-k8s-stack.monitoring.svc.cluster.local:8428/api/v1/import/prometheus
 ```
+
+**`victoriaMetrics.url` is the one value you must set.** The chart's default is a
+placeholder, and a bare service name will not resolve from another namespace.
+Everything else has a working default — see [Configuration](#configuration).
+
+**Keep `fullnameOverride`.** Without it Helm prefixes the release name onto every
+resource, which changes the `job` label and orphans existing metric history.
+
+For anything beyond a couple of overrides, use a values file:
+
+```bash
+helm upgrade --install ecobee-runtime-importer oci://ghcr.io/scottrus/charts/ecobee-runtime-importer --version 0.1.5 -n ecobee-runtime-importer -f my-values.yaml
+```
+
+<details>
+<summary>Deploying the chart from a clone instead</summary>
+
+`make deploy` runs `helm upgrade --install` against `charts/` in the working
+tree, with the namespace and `fullnameOverride` filled in. That is for
+developing the chart; released deployments should name a published version so
+what ran is recoverable from the tag.
+
+```bash
+make deploy HELM_ARGS='--set victoriaMetrics.url=http://...'
+```
+</details>
 
 ### 4. Confirm it works
 
@@ -185,138 +213,87 @@ make setup && .venv/bin/pytest
 
 ### Releasing
 
-Releases are cut from `main` and gated on CI having passed for that exact
-commit. Three things must agree, and the release workflow refuses the tag if
-they do not:
+**No pull request declares a version.** The git tag is the only place a version
+exists:
 
-| | |
-|---|---|
-| the git tag | `vX.Y.Z` |
-| `__version__` in `src/ecobee_importer/__init__.py` | `X.Y.Z` |
-| the image tag in `deploy/deployment.yaml` | `X.Y.Z` |
+- the **package** version comes from `setuptools-scm`, which reads the tag —
+  local trees get `0.1.5.dev3+g9e3b566`, release builds get the tag exactly;
+- the **chart** version and `appVersion` are injected at package time
+  (`helm package --version "$TAG" --app-version "$TAG"`), so `Chart.yaml` holds
+  `0.0.0` placeholders forever;
+- the **image tag** follows `appVersion`.
 
-That third one is what keeps step 3 of the setup honest: a fresh clone applies
-`deploy/` against an image that this release actually published. `make manifests`
-checks the same agreement locally.
+So a fix PR contains only the fix. Releasing is:
 
 ```bash
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-The workflow then builds `linux/amd64,linux/arm64`, pushes to GHCR with an SBOM
-and `provenance: mode=max`, attests the build, and opens a GitHub release.
+The workflow refuses the tag unless that exact commit is on `main` **and** CI
+passed on it — branch protection is what stands behind every release. It then
+builds `linux/amd64,linux/arm64`, publishes the image and chart to GHCR, attests
+the build, and opens a GitHub release.
 
-To run the importer against a local VictoriaMetrics, write
-`{"refresh_token": "..."}` to `./credentials.json` from the bootstrap output,
-then:
-
-```bash
-ECOBEE_TOKEN_STORE=file ECOBEE_TOKEN_FILE=./credentials.json ECOBEE_VM_IMPORT_URL=http://localhost:8428/api/v1/import/prometheus .venv/bin/python -m ecobee_importer
-```
-
----
+Wait for CI to go green on `main` before tagging: the gate cannot tell "CI is
+still running" from "CI failed", so tagging too early fails the release. Re-run
+it once CI finishes — no re-tag needed, since the commit has not changed.
 
 ## Configuration
 
-Everything is environment-driven, and in Kubernetes everything lives in
-`deploy/config.env`, rendered into a ConfigMap by kustomize and consumed with
-`envFrom`. Adapting to a different shape is a one-file edit — the Deployment
-needs no changes, and a key added there needs no matching entry in the pod spec.
+Everything lives in the chart's `values.yaml`. Nothing has to agree with
+anything else by hand — the values that used to be duplicated are now rendered
+from one place each:
 
-**A config edit rolls the pods by itself.** The ConfigMap is generated, so its
-name carries a hash of the contents; changing `config.env` changes the pod spec,
-and `make deploy` restarts the deployment as a result. That matters because the
-process reads its environment once at startup — with a hand-written ConfigMap, an
-edit applies cleanly, changes nothing, and waits silently for an unrelated
-restart.
+| Value | Drives |
+|---|---|
+| `credentials.existingSecret` | the env var **and** the Role's `resourceNames` |
+| `service.port` | `containerPort`, the Service, **and** `ECOBEE_METRICS_PORT` |
+| `.Release.Namespace` | every resource, via `--namespace` |
+| `.Chart.AppVersion` | the image tag, injected from the git tag at release |
 
-```bash
-make deploy
-```
+A values change rolls the pods automatically: the pod template carries a
+`checksum/config` annotation over the rendered ConfigMap, so an edit changes the
+pod spec. That matters because the process reads its environment once at startup.
 
-Restarting is cheap: there is no persisted state, and the startup lookback
-re-imports recent history idempotently.
-
-| Variable | Default | Notes |
+| Key | Default | Notes |
 |---|---|---|
-| `ECOBEE_TOKEN_STORE` | `file` | `file` or `kubernetes` |
-| `ECOBEE_TOKEN_FILE` | `/var/lib/ecobee/credentials.json` | `file` store only |
-| `ECOBEE_SECRET_NAME` | `ecobee-importer-tokens` | kustomize copies it into the Role's `resourceNames` |
-| `ECOBEE_SECRET_NAMESPACE` | pod's own namespace | Set only to read a Secret elsewhere |
-| `ECOBEE_VM_IMPORT_URL` | `http://victoriametrics:8428/...` | Code default only; a bare name will not resolve cross-namespace. `config.env` sets a real FQDN |
-| `ECOBEE_VM_AUTH_HEADER_FILE` | — | File whose contents become the `Authorization` header |
-| `ECOBEE_WRITE_TIMEOUT_SECONDS` | `60` | |
-| `ECOBEE_IMPORT_INTERVAL_SECONDS` | `900` | **Hard floor 900.** Lower values are clamped |
-| `ECOBEE_STARTUP_LOOKBACK_HOURS` | `24` | Re-imported on every restart; capped at 31 days |
-| `ECOBEE_OVERLAP_MINUTES` | `60` | Re-request recent buckets to pick up late data |
-| `ECOBEE_THERMOSTAT_CACHE_SECONDS` | `3600` | How often names/time zones are refreshed |
-| `ECOBEE_INCLUDE_SENSORS` | `true` | Per-remote-sensor history |
-| `ECOBEE_EXTRA_COLUMNS` | — | CSV. **Adds to** the default set |
-| `ECOBEE_COLUMNS` | — | CSV. **Replaces** the default set |
-| `ECOBEE_EXTRA_LABELS` | — | `key=value,...` on every sample |
-| `ECOBEE_METRICS_PORT` | `9863` | Not set in `config.env` — see below |
-| `ECOBEE_LOG_LEVEL` | `INFO` | |
-
-### Where each value is defined once
-
-Three things used to be "must match" rules kept by comments. They are now
-mechanical:
-
-**The Secret name** lives only in `config.env`. A kustomize `replacement:` copies
-it into the Role's `resourceNames`, which is what keeps `patch` on secrets from
-meaning *every* secret in the namespace. Renaming it in one place is now the only
-way to rename it.
-
-**The namespace** lives only in the `namespace:` field of `kustomization.yaml`.
-The transformer rewrites every resource including the `Namespace` object, and the
-Makefile reads the same field.
-
-**The metrics port** lives only in `containerPort`. `ECOBEE_METRICS_PORT` is
-deliberately absent from `config.env` — the application default is the same
-number, and the Service targets the port *name*, so nothing can disagree. Set it
-only if you also change `containerPort`.
-
-### Other shapes
-
-- **Cluster VictoriaMetrics** — point `ECOBEE_VM_IMPORT_URL` at
-  `http://vminsert.<ns>.svc.cluster.local:8480/insert/0/prometheus/api/v1/import/prometheus`.
-- **Authenticated destination** — mount a Secret and set
-  `ECOBEE_VM_AUTH_HEADER_FILE` to the mounted path. It is a *path*, not a value,
-  so the credential never enters the ConfigMap, and it is re-read per write so
-  rotation needs no restart.
-- **A different namespace** — change **one line**: `namespace:` in
-  `deploy/kustomization.yaml`. See below.
-- **Network policy** — if your cluster restricts traffic, both directions matter.
-  See the troubleshooting entry on write timeouts.
+| `victoriaMetrics.url` | placeholder | **Set this.** Needs an FQDN cross-namespace |
+| `victoriaMetrics.authHeaderFile` | — | Path to a mounted file; never put the value in values |
+| `credentials.existingSecret` | `ecobee-importer-tokens` | Created out of band; never templated |
+| `credentials.namespace` | — | Only to read a Secret elsewhere; needs a ClusterRole |
+| `importIntervalSeconds` | `900` | **Hard floor 900.** Lower values are clamped |
+| `startupLookbackHours` | `24` | Re-imported on every restart; capped at 31 days |
+| `overlapMinutes` | `60` | Re-request recent buckets to pick up late data |
+| `collection.includeSensors` | `true` | Per-remote-sensor history |
+| `collection.extraColumns` / `.columns` | — | Add to / replace the default column set |
+| `collection.extraLabels` | `{}` | Static labels on every sample |
+| `service.port` | `9863` | |
+| `vmServiceScrape.enabled` / `vmRule.enabled` | `true` | Set false without the VM operator |
+| `logLevel` | `INFO` | |
 
 ### Deploying to a different namespace
 
-Edit the `namespace:` field in `deploy/kustomization.yaml`. That is the only
-change required:
-
-```yaml
-namespace: my-namespace
-```
-
-kustomize's transformer rewrites `metadata.namespace` on every namespaced
-resource **and renames the `Namespace` resource itself**, the Makefile reads that
-same field for its `kubectl` targets, and the importer resolves its Secret's
-namespace from the pod's own ServiceAccount mount at runtime. Nothing else — not
-`namespace.yaml`, not `rbac.yaml`, not the Makefile — needs editing.
-
-Check the result before applying:
+Pass `--namespace`. Helm namespaces the whole release, so nothing in the chart
+needs editing, and the importer resolves its Secret's namespace from the pod at
+runtime.
 
 ```bash
-kubectl kustomize deploy/ | grep -E '^kind:|namespace:'
+helm upgrade --install ecobee-runtime-importer oci://ghcr.io/scottrus/charts/ecobee-runtime-importer --version 0.1.5 --namespace my-namespace --create-namespace --set fullnameOverride=ecobee-runtime-importer
 ```
+
+`make secret NAMESPACE=my-namespace` puts the credential in the same place.
 
 One caveat outside this repo's control: `VMServiceScrape` and `VMRule` are only
 discovered from an arbitrary namespace if your VMAgent and VMAlert run
 `selectAllByDefault: true`, or you add matching namespace selectors.
-- **More than one ecobee account** — a second instance with its own ConfigMap,
-  Secret, and `ECOBEE_EXTRA_LABELS=site=...` to keep the series apart.
 
----
+### The Secret is never templated
+
+The chart will not create the credential Secret, and `make helm` fails if a
+template ever renders one. The importer **writes** that Secret — Auth0 rotates
+the refresh token and the new value is patched back — so a Helm-managed copy
+would be reset on every `helm upgrade`, presenting a revoked token and requiring
+a fresh interactive login.
 
 ## Not abusing the API
 

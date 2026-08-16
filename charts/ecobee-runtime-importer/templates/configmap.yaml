@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ecobee.fullname" . }}
+  labels: {{- include "ecobee.labels" . | nindent 4 }}
+data:
+  ECOBEE_TOKEN_STORE: "kubernetes"
+  ECOBEE_SECRET_NAME: {{ include "ecobee.secretName" . | quote }}
+  {{- with .Values.credentials.namespace }}
+  ECOBEE_SECRET_NAMESPACE: {{ . | quote }}
+  {{- end }}
+
+  ECOBEE_VM_IMPORT_URL: {{ .Values.victoriaMetrics.url | quote }}
+  ECOBEE_WRITE_TIMEOUT_SECONDS: {{ .Values.victoriaMetrics.writeTimeoutSeconds | int | quote }}
+  {{- with .Values.victoriaMetrics.authHeaderFile }}
+  ECOBEE_VM_AUTH_HEADER_FILE: {{ . | quote }}
+  {{- end }}
+
+  {{/* int, not toString: a values FILE parses numbers as float64 while --set
+       parses int64, so an unguarded large integer can render as 9.0e+02. */}}
+  ECOBEE_IMPORT_INTERVAL_SECONDS: {{ .Values.importIntervalSeconds | int | quote }}
+  ECOBEE_STARTUP_LOOKBACK_HOURS: {{ .Values.startupLookbackHours | int | quote }}
+  ECOBEE_OVERLAP_MINUTES: {{ .Values.overlapMinutes | int | quote }}
+  ECOBEE_THERMOSTAT_CACHE_SECONDS: {{ .Values.thermostatCacheSeconds | int | quote }}
+
+  ECOBEE_INCLUDE_SENSORS: {{ .Values.collection.includeSensors | quote }}
+  {{- with .Values.collection.extraColumns }}
+  ECOBEE_EXTRA_COLUMNS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.collection.columns }}
+  ECOBEE_COLUMNS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.collection.extraLabels }}
+  ECOBEE_EXTRA_LABELS: {{ range $i, $k := (keys . | sortAlpha) }}{{ if $i }},{{ end }}{{ $k }}={{ get $ $k }}{{ end }}
+  {{- end }}
+
+  ECOBEE_METRICS_PORT: {{ .Values.service.port | int | quote }}
+  ECOBEE_LOG_LEVEL: {{ .Values.logLevel | quote }}

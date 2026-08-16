@@ -78,18 +78,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Check the tag matches the package and the deployed manifest
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-          pkg="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/ecobee_importer/__init__.py)"
-          # The README's install path is `clone && kubectl apply -k deploy/`, so
-          # the manifest's pinned tag has to be the one this release publishes.
-          # Otherwise a fresh clone deploys some other build.
-          man="$(grep -oE 'image: ghcr\.io/[^:]+:[^ ]+' deploy/deployment.yaml | sed 's/.*://')"
-          echo "tag=$tag package=$pkg manifest=$man"
-          [ "$tag" = "$pkg" ] || { echo "::error::tag != __version__"; exit 1; }
-          [ "$tag" = "$man" ] || { echo "::error::tag != deploy/deployment.yaml image tag"; exit 1; }
+      # No version comparison here any more. Nothing in the tree declares a
+      # version: setuptools-scm derives the package version from this tag, and
+      # the chart's version/appVersion are injected at package time. There is no
+      # second copy that could disagree with the tag.
+
+      - id: version
+        name: Version from the tag
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -121,6 +117,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           sbom: true
           provenance: mode=max
+          build-args: |
+            SETUPTOOLS_SCM_PRETEND_VERSION=${{ steps.version.outputs.version }}
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -129,9 +127,40 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
+  chart:
+    name: Chart
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # push the chart to GHCR as an OCI artifact
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.3
+
+      # --version and --app-version are what keep version literals OUT of the
+      # repository. Chart.yaml carries 0.0.0 placeholders; the tag is the single
+      # declaration, so no pull request ever has to predict a release number.
+      - name: Package and push to GHCR as an OCI artifact
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ${{ env.REGISTRY }} \
+                --username ${{ github.actor }} --password-stdin
+          helm package charts/ecobee-runtime-importer \
+            --version "$version" --app-version "$version" \
+            --destination /tmp/chart
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          helm push /tmp/chart/ecobee-runtime-importer-*.tgz \
+            "oci://${{ env.REGISTRY }}/${owner}/charts"
+
   release:
     name: GitHub release
-    needs: image
+    needs: [image, chart]
     runs-on: ubuntu-latest
     permissions:
       contents: write        # create the GitHub release
@@ -155,12 +184,21 @@ jobs:
 
             ## Install
 
-            `deploy/` at this tag already pins this image, so there is nothing to
-            build. Follow the four steps in the
-            [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md#setup)
-            — it is the authoritative source for setup, and duplicating it here
-            is how the two drift.
-
             ```bash
-            git clone --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git
+            helm upgrade --install ecobee-runtime-importer \
+              oci://ghcr.io/${{ github.repository_owner }}/charts/ecobee-runtime-importer \
+              --version ${{ github.ref_name }} \
+              --namespace ecobee-runtime-importer --create-namespace \
+              --set fullnameOverride=ecobee-runtime-importer \
+              --set victoriaMetrics.url=http://vmsingle-<release>.<ns>.svc.cluster.local:8428/api/v1/import/prometheus
             ```
+
+            The credential Secret is created **out of band** and is NOT managed by
+            the chart — the importer rotates the refresh token in place, so a
+            Helm-managed Secret would be reset on every upgrade and lock the
+            account out. See the [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md#setup)
+            for the interactive bootstrap step.
+
+            > `--set fullnameOverride` keeps resource names stable across
+            > releases. Without it Helm prefixes the release name, which changes
+            > the `job` label and orphans existing metric history.

@@ -1,0 +1,32 @@
+{{/*
+What is scraped here is ONLY the importer's own health — reauth state, cycle
+counts, watermarks. House data never appears on this endpoint; it is written
+straight to VictoriaMetrics with its original timestamps.
+*/}}
+{{- if .Values.vmServiceScrape.enabled }}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ include "ecobee.fullname" . }}
+  labels: {{- include "ecobee.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {{- include "ecobee.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.vmServiceScrape.interval }}
+{{- end }}
+{{- if .Values.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "ecobee.fullname" . }}
+  labels: {{- include "ecobee.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {{- include "ecobee.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.vmServiceScrape.interval }}
+{{- end }}

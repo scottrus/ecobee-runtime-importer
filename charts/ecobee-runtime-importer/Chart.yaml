@@ -1,0 +1,19 @@
+apiVersion: v2
+name: ecobee-runtime-importer
+description: Imports ecobee runtimeReport 5-minute history into VictoriaMetrics, without a developer API key
+type: application
+# ⚠️ PLACEHOLDERS. Both are injected at release time from the git tag:
+#
+#     helm package charts/ecobee-runtime-importer --version "$TAG" --app-version "$TAG"
+#
+# so no version is ever committed and no pull request has to predict the next
+# release number. `helm template` and `helm lint` run fine against 0.0.0 — the
+# rendered image tag is not an image anyone deploys from a working tree.
+version: 0.0.0
+appVersion: "0.0.0"
+home: https://github.com/scottrus/ecobee-runtime-importer
+sources:
+  - https://github.com/scottrus/ecobee-runtime-importer
+keywords: [prometheus, victoriametrics, ecobee, hvac, thermostat, monitoring]
+maintainers:
+  - name: Scott Russell

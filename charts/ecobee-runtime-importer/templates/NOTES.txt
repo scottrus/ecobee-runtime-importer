@@ -1,0 +1,30 @@
+{{ include "ecobee.fullname" . }} {{ .Chart.AppVersion }} installed into {{ .Release.Namespace }}.
+
+Image:       {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+Destination: {{ .Values.victoriaMetrics.url }}
+Secret:      {{ include "ecobee.secretName" . }} (created out of band, NOT by this chart)
+
+Watch the first cycle:
+
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "ecobee.fullname" . }} -f
+
+A healthy first cycle refreshes the token, resolves four thermostats with their
+IANA zones, and writes tens of thousands of samples — the startup lookback pulls
+{{ .Values.startupLookbackHours }} hours of 5-minute buckets.
+
+{{ if not .Values.credentials.existingSecret }}
+⚠️  credentials.existingSecret is unset. Create the Secret first — see the repo
+    README's setup steps — then upgrade.
+{{ end }}
+⚠️  IMPORTED SERIES ARE STALE BETWEEN 15-MINUTE BATCHES. An instant query
+    returns EMPTY even when data is landing correctly:
+
+      count(ecobee_zone_temperature_fahrenheit)                    -> empty
+      count(last_over_time(ecobee_zone_temperature_fahrenheit[1h])) -> works
+
+    Grafana panels need a step or lookback of at least 15 minutes.
+
+⚠️  THE SECRET IS MUTABLE STATE. Auth0 rotates the refresh token and the
+    importer patches the new value back. After the first refresh the cluster's
+    copy is authoritative — re-applying a saved copy presents a revoked token
+    and locks the account out.
