@@ -278,8 +278,12 @@ docker-lint:
 		echo "==> hadolint"; hadolint --failure-threshold warning Dockerfile; \
 	fi
 
+# Depends on setup because VERSION is read from the INSTALLED package. Without a
+# venv it resolves to an empty string, and an empty --build-arg overrides the
+# Dockerfile's default rather than falling back to it — which fails the build
+# with "setuptools-scm was unable to detect version".
 .PHONY: docker-build
-docker-build:
+docker-build: setup
 	@if ! command -v docker >/dev/null 2>&1; then $(call missing,docker,docker build); else \
 		set -e; echo "==> docker build"; \
 		docker build --build-arg SETUPTOOLS_SCM_PRETEND_VERSION="$(VERSION)" \
@@ -287,7 +291,7 @@ docker-build:
 	fi
 
 .PHONY: docker-smoke
-docker-smoke:
+docker-smoke: setup
 	@if ! command -v docker >/dev/null 2>&1; then $(call missing,docker,image smoke test); else \
 		set -e; echo "==> image smoke test"; \
 		docker image inspect $(IMAGE) >/dev/null \
