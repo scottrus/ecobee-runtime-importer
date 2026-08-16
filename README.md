@@ -39,6 +39,28 @@ Design rationale, failure modes and the traps in ecobee's data are in
 Duty cycle is `ecobee_equipment_runtime_seconds / 300`. It is a gauge of
 seconds-per-bucket, **not** a counter — do not wrap it in `rate()`.
 
+**Each bucket is written once.** Every cycle re-requests the overlap window, so
+buckets already imported are offered again — with a 60-minute overlap and a
+15-minute interval, four times each. Only values that are **new or changed** are
+sent, so late-arriving and revised data still lands while identical re-writes do
+not. `ecobee_samples_skipped_total` counts what was suppressed.
+
+The one exception is a **restart**, which re-imports its lookback window with an
+empty cache and so re-writes those buckets. The cache is deliberately in memory:
+persisting it would reintroduce the state-corruption risk that keeping the
+watermark in memory exists to avoid, and restarts are rare.
+
+That matters because VictoriaMetrics stores duplicate samples unless
+deduplication is configured, and raw-sample functions then over-count. If your
+history predates this, or spans restarts, prefer the subquery form:
+
+```
+sum(sum_over_time(last_over_time(ecobee_equipment_runtime_seconds[5m])[24h:5m])) by (thermostat) / 3600
+```
+
+`last_over_time`, `max_over_time` and `min_over_time` are unaffected either way,
+because duplicates carry identical values.
+
 **Door and window SmartSensors are included.** They arrive as
 `sensorType: dryContact` in the sensor report, with the same 5-minute history as
 everything else. This contradicts the widely repeated claim that they are

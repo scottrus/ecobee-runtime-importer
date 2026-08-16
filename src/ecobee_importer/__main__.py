@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 
 from . import __version__
 from .config import MAX_REPORT_DAYS, Config, ConfigError
+from .dedup import SentCache
 from .ecobee import EcobeeClient, ReauthRequired, Thermostat
 from .health import (
     API_REQUESTS,
@@ -31,6 +32,7 @@ from .health import (
     LAST_SUCCESSFUL_IMPORT,
     NEWEST_BUCKET,
     REAUTH_REQUIRED,
+    SAMPLES_SKIPPED,
     SAMPLES_WRITTEN,
     TOKEN_REFRESHES,
     serve,
@@ -60,6 +62,10 @@ class Importer:
             extra_labels=cfg.extra_labels,
             auth_header_file=cfg.vm_auth_header_file,
         )
+
+        # Suppresses re-writing buckets whose value has not changed. In memory
+        # on purpose — see dedup.py.
+        self._sent = SentCache()
 
         self._thermostats: list[Thermostat] = []
         self._thermostats_fetched_at = 0.0
@@ -166,8 +172,24 @@ class Importer:
             _summarize(report, samples)
             return 0
 
-        written = self.writer.write(samples)
-        SAMPLES_WRITTEN.inc(written)
+        # Send only what is new or has changed. The overlap window deliberately
+        # re-requests buckets already imported — with a 60-minute overlap and a
+        # 15-minute interval each one is offered four times — and re-writing an
+        # identical value inflates every raw-sample function that reads it.
+        fresh = self._sent.unsent(samples)
+        skipped = len(samples) - len(fresh)
+        if skipped:
+            SAMPLES_SKIPPED.inc(skipped)
+
+        written = 0
+        if fresh:
+            written = self.writer.write(fresh)
+            SAMPLES_WRITTEN.inc(written)
+            # Only after the write lands: recording first would silently drop
+            # these buckets on the retry after a failed write.
+            self._sent.remember(fresh)
+        else:
+            _LOGGER.info("No new or changed buckets in window (%d unchanged)", skipped)
 
         # Advance only after a successful write, so a VictoriaMetrics outage is
         # retried rather than skipped over.
@@ -185,8 +207,15 @@ class Importer:
             if per_stat:
                 NEWEST_BUCKET.labels(thermostat=thermostat.name).set(max(per_stat) / 1000)
 
+        # Anything older than the overlap will never be offered again, so
+        # remembering it buys nothing and the cache would grow without bound.
+        self._sent.prune(start_ms)
+
         _LOGGER.info(
-            "Imported %d samples, newest bucket %s", written, newest_dt.isoformat()
+            "Imported %d samples (%d unchanged, not re-sent), newest bucket %s",
+            written,
+            skipped,
+            newest_dt.isoformat(),
         )
         return written
 

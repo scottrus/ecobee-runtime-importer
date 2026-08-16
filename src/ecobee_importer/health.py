@@ -50,6 +50,13 @@ SAMPLES_WRITTEN = Counter(
     "Samples accepted by the metrics backend.",
 )
 
+SAMPLES_SKIPPED = Counter(
+    "ecobee_samples_skipped_total",
+    "Samples inside the overlap window whose value was unchanged, so they were "
+    "not re-sent. Re-writing them would inflate count_over_time and "
+    "sum_over_time over the imported series.",
+)
+
 TOKEN_REFRESHES = Counter(
     "ecobee_token_refreshes_total",
     "Token refresh attempts, by outcome.",

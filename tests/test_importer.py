@@ -16,7 +16,7 @@ from ecobee_importer.ecobee import Thermostat
 IDENT = "411111111111"
 
 
-def report_at(moments):
+def report_at(moments, temp="72.1"):
     """A minimal runtimeReport whose rows sit at the given UTC datetimes.
 
     Rows are emitted in thermostat-local time, as the real API does, so this
@@ -28,7 +28,7 @@ def report_at(moments):
         "reportList": [
             {
                 "thermostatIdentifier": IDENT,
-                "rowList": [f"{m:%Y-%m-%d},{m:%H:%M:%S},721" for m in local],
+                "rowList": [f"{m:%Y-%m-%d},{m:%H:%M:%S},{temp}" for m in local],
             }
         ],
     }
@@ -111,3 +111,34 @@ def test_backfill_does_not_move_the_live_watermark():
 
     assert written == 1
     assert importer.watermark == before
+
+
+def test_second_cycle_over_the_same_window_writes_nothing():
+    """The steady-state duplicate, end to end.
+
+    The overlap re-offers buckets already imported. Before suppression each was
+    written on four consecutive cycles, so raw-sample functions over the
+    imported series inflated ~4x.
+    """
+    recent = datetime.now(UTC) - timedelta(minutes=30)
+    importer, writer = build(report_at([recent]))
+
+    first = importer.cycle()
+    second = importer.cycle()
+
+    assert first == 1
+    assert second == 0
+    assert len(writer.samples) == 1
+
+
+def test_a_changed_value_is_written_on_the_next_cycle():
+    """A revision must still reach the database."""
+    recent = datetime.now(UTC) - timedelta(minutes=30)
+    importer, writer = build(report_at([recent]))
+    importer.cycle()
+
+    # ecobee revises the bucket: same timestamp, different value.
+    importer.client.report = report_at([recent], temp="80.0")
+
+    assert importer.cycle() == 1
+    assert [s.value for s in writer.samples] == [72.1, 80.0]
