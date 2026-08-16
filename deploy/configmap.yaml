@@ -30,10 +30,14 @@ data:
   # which also requires promoting the Role in rbac.yaml to a ClusterRole.
 
   # --- destination -------------------------------------------------------
-  # Single-node VictoriaMetrics. Common alternatives:
-  #   cluster VM   http://vminsert:8480/insert/0/prometheus/api/v1/import/prometheus
-  #   vmagent      http://vmagent:8429/api/v1/import/prometheus
-  ECOBEE_VM_IMPORT_URL: "http://victoriametrics:8428/api/v1/import/prometheus"
+  # Single-node VictoriaMetrics, cross-namespace, so the FQDN is required — the
+  # importer runs in its own namespace and a bare service name would not resolve.
+  #
+  # Common alternatives:
+  #   vmks single  http://vmsingle-<release>.<ns>.svc.cluster.local:8428/api/v1/import/prometheus
+  #   cluster VM   http://vminsert.<ns>.svc.cluster.local:8480/insert/0/prometheus/api/v1/import/prometheus
+  #   vmagent      http://vmagent.<ns>.svc.cluster.local:8429/api/v1/import/prometheus
+  ECOBEE_VM_IMPORT_URL: "http://vmsingle-vmks-victoria-metrics-k8s-stack.monitoring.svc.cluster.local:8428/api/v1/import/prometheus"
   ECOBEE_WRITE_TIMEOUT_SECONDS: "60"
   # For a destination behind authentication, mount a Secret and point at the
   # file — the value is never put in this ConfigMap:

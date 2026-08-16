@@ -51,12 +51,29 @@ help:
 # people to create. CI has no uv and takes the pip path.
 UV := $(shell command -v uv 2>/dev/null || echo "")
 
-$(VENV):
-	@if [ -n "$(UV)" ]; then uv venv $(VENV); \
-	else python3 -m venv $(VENV) && $(PIP) install --quiet --upgrade pip; fi
+# The venv is validated by probing for a usable installer, NOT by the directory
+# existing. A failed `python3 -m venv` (no ensurepip, the default on Debian and
+# Ubuntu) still leaves .venv/ behind, and a directory-timestamp target would then
+# be considered satisfied forever -- every later run skips creation and fails on a
+# missing .venv/bin/pip, which looks nothing like the original error.
+.PHONY: venv
+venv:
+	@if [ -n "$(UV)" ]; then \
+		uv venv --allow-existing $(VENV); \
+	elif [ ! -x "$(PIP)" ]; then \
+		rm -rf $(VENV); \
+		python3 -m venv $(VENV) || { \
+			rm -rf $(VENV); \
+			echo "ERROR: python3 -m venv failed."; \
+			echo "  Debian/Ubuntu ship python3 without ensurepip. Install the venv"; \
+			echo "  package named in the message above -- 'apt install python3-venv',"; \
+			echo "  or the version-specific 'apt install python3.12-venv'."; \
+			exit 1; }; \
+		$(PIP) install --quiet --upgrade pip; \
+	fi
 
 .PHONY: setup
-setup: $(VENV)
+setup: venv
 	@if [ -n "$(UV)" ]; then uv pip install --quiet --python $(PY) -e ".[bootstrap,dev]"; \
 	else $(PIP) install --quiet -e ".[bootstrap,dev]"; fi
 

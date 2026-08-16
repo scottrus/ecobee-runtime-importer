@@ -7,9 +7,8 @@ client. That flow walks hosted login forms and, if the account has TOTP
 multi-factor enabled, requires a code from an authenticator app — so it needs a
 human and cannot be scheduled.
 
-Run this once. It prints a credentials document, or writes one with `--out PATH`
-(preferred — that keeps the token out of your scrollback). Store the refresh
-token in a password manager and create the Kubernetes Secret from it.
+Run this once. It writes a credentials file and stops there — setup lives in the
+README, which is the single authoritative source for it.
 
 Your password is used only to complete this login. It is not written anywhere by
 this script and never reaches the running importer.
@@ -46,9 +45,15 @@ def main() -> int:
     parser.add_argument(
         "--out",
         metavar="PATH",
-        help="Write the credentials to this file (mode 0600) instead of printing "
-        "them. Preferred: keeps the token out of your terminal scrollback and "
-        "clipboard. Use ./credentials.json for local runs.",
+        default="./credentials.json",
+        help="Where to write the credentials, mode 0600. Default: ./credentials.json",
+    )
+    parser.add_argument(
+        "--print",
+        dest="print_",
+        action="store_true",
+        help="Print the credentials instead of writing them. Opt-in, because it "
+        "puts a live token in your terminal scrollback and clipboard history.",
     )
     args = parser.parse_args()
 
@@ -92,7 +97,13 @@ def main() -> int:
         "access_token": api.access_token or "",
     }
 
-    if args.out:
+    if args.print_:
+        print("\n" + "=" * 72)
+        print("Credentials — treat as a password. Do not paste into chat or tickets.")
+        print("=" * 72)
+        print(json.dumps(document, indent=2))
+        print("=" * 72)
+    else:
         # Reuses the importer's own store so the file lands atomically at 0600
         # and in exactly the shape the importer expects to read back.
         from ecobee_importer.tokens import FileTokenStore, Tokens
@@ -104,41 +115,12 @@ def main() -> int:
             )
         )
         print(f"\nLogin succeeded. Credentials written to {args.out} (mode 0600).")
-        print("Read the refresh token out of that file to create the Secret:\n")
-        # sys.executable, not a bare `python`: on macOS and many distributions
-        # only `python3` is on PATH, and inside a venv neither name is
-        # guaranteed. This is the interpreter that just ran, so it exists.
-        read_token = (
-            f"{sys.executable} -c "
-            "'import json,sys;print(json.load(open(sys.argv[1]))[\"refresh_token\"])' "
-            f"{args.out}"
-        )
-        print(
-            "  kubectl create secret generic ecobee-importer-tokens \\\n"
-            "    -n ecobee-runtime-importer \\\n"
-            f'    --from-literal=refresh_token="$({read_token})"\n'
-        )
-    else:
-        print("\n" + "=" * 72)
-        print("Credentials — treat as a password. Do not paste into chat or tickets.")
-        print("=" * 72)
-        print(json.dumps(document, indent=2))
-        print("=" * 72)
-        print(
-            "\nNext:\n"
-            "  1. Store the refresh token in your password manager.\n"
-            "  2. Create the Secret:\n\n"
-            "     kubectl create secret generic ecobee-importer-tokens \\\n"
-            "       -n ecobee-runtime-importer \\\n"
-            "       --from-literal=refresh_token='<value>'\n"
-        )
 
-    print(
-        "The importer rotates this token in place once deployed. After the first\n"
-        "rotation the cluster's Secret is authoritative and any copy you keep is\n"
-        "only a bootstrap seed — restoring that copy over it will lock the account\n"
-        "out and send you back to this script.\n"
-    )
+    # Deliberately no install instructions here. This script authenticates; the
+    # README owns setup end to end. Restating its steps in a second place is
+    # exactly how the two drifted — the printed copy kept telling people to
+    # create a Secret in a namespace that nothing had created yet.
+    print("Continue with the README.\n")
     return 0
 
 
