@@ -52,8 +52,8 @@ help:
 	@echo "Install and recovery (needs kubectl):"
 	@echo "  make bootstrap       log in to ecobee, write $(CREDS)"
 	@echo "  make secret          create OR replace the Secret (applies the namespace)"
-	@echo "  make deploy          kubectl apply -k $(DEPLOY)/"
-	@echo "  make restart         roll the deployment (needed after a Secret change)"
+	@echo "  make deploy          helm upgrade --install into $(NAMESPACE)"
+	@echo "  make restart         roll the deployment (helm has no equivalent)"
 	@echo "  make reauth          bootstrap + secret + restart, for a dead token"
 	@echo
 	@echo "  make lint            ruff check, ruff format --check"
