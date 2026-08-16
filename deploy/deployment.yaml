@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: importer
-          image: ghcr.io/scottrus/ecobee-runtime-importer:0.1.3
+          image: ghcr.io/scottrus/ecobee-runtime-importer:0.1.4
           imagePullPolicy: IfNotPresent
           # All configuration comes from the ConfigMap, so adapting to a
           # different shape does not mean editing this file. Adding a key there

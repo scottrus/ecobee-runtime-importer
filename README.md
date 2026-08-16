@@ -369,14 +369,28 @@ pod. Then clean up and watch it recover:
 rm credentials.json && kubectl logs -n ecobee-runtime-importer deploy/ecobee-runtime-importer -f
 ```
 
-The three steps are each available on their own, and two of them are easy to get
-wrong by hand, which is why they are targets:
+The three steps are each available on their own:
 
 - `make secret` **replaces** an existing Secret. Plain `kubectl create secret`
   fails once one exists, so the setup command is the wrong one for recovery.
-- `make restart` is **required, not optional**. Credentials are read once at
-  startup, so a running importer keeps retrying the dead token every cycle and
-  never notices a corrected Secret.
+- `make restart` is **no longer required** — the importer re-reads the
+  credential store after a rejected token, so correcting the Secret is enough on
+  its own and it recovers within one cycle. `make reauth` still restarts,
+  because waiting up to 15 minutes to find out whether you fixed it is a poor
+  way to spend an incident.
+
+The log says which case you are in:
+
+```
+Credential store now holds a different token; retrying on the next cycle.
+```
+
+```
+The credential store still holds the token that was just rejected.
+```
+
+The second means the Secret was never actually updated — check that `make
+secret` ran against the namespace the importer is deployed in.
 
 **No history is lost.** `runtimeReport` serves up to 31 days retroactively, so
 the startup lookback plus a `--backfill-from` recovers everything the outage
