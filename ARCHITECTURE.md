@@ -280,6 +280,17 @@ sets `ecobee_reauth_required 1`, keeps serving metrics, and keeps that alert fir
 someone re-runs the bootstrap. Crashing would only add a CrashLoopBackOff to an incident
 that already needs hands.
 
+**It also re-reads the credential store on every such failure**, so the human's part ends
+at replacing the Secret. Without that the rejected token lives in memory for the life of
+the process: an operator could correct the Secret perfectly and watch the importer keep
+failing against the old value, with a pod restart as the only cure. That is a bad shape
+for a recovery path — the fix appears not to work, which invites people to go looking for
+a second problem that does not exist.
+
+The reload's return value drives the log, and the distinction matters during an incident:
+a changed token says *retrying next cycle*, an unchanged one says *the store still holds
+what was just rejected* — which means the update did not land where the importer reads.
+
 ---
 
 ## 5. The import loop

@@ -221,11 +221,30 @@ class Importer:
                 TOKEN_REFRESHES.labels(outcome="invalid_grant").inc()
                 CYCLES.labels(result="auth_error").inc()
                 _LOGGER.error(
-                    "Re-authentication required (%s). Re-run scripts/bootstrap.py "
-                    "and update the credential store. Collection is stopped until "
-                    "then; this process stays up to keep serving the alert.",
+                    "Re-authentication required (%s). Run `make reauth`, or mint a "
+                    "token and update the credential store by hand.",
                     err,
                 )
+                # Re-read the store so that fixing the Secret is sufficient on
+                # its own. Without this the rejected token is held in memory for
+                # the life of the process, and an operator who corrects the
+                # Secret perfectly watches it keep failing until a restart.
+                try:
+                    if self.client.reload():
+                        _LOGGER.info(
+                            "Credential store now holds a different token; "
+                            "retrying on the next cycle. No restart needed."
+                        )
+                    else:
+                        _LOGGER.error(
+                            "The credential store still holds the token that was "
+                            "just rejected. Collection stays stopped until it is "
+                            "replaced; this process stays up to serve the alert."
+                        )
+                except Exception:
+                    # A store that cannot be read is a separate problem, and it
+                    # must not take down the process that is reporting the first.
+                    _LOGGER.exception("Could not re-read the credential store")
             except Exception:
                 CYCLES.labels(result="error").inc()
                 _LOGGER.exception("Import cycle failed; retrying next cycle")

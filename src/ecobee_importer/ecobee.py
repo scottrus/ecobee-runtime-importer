@@ -68,7 +68,11 @@ class Thermostat:
 class EcobeeClient:
     def __init__(self, store: TokenStore):
         self._store = store
-        self._tokens = store.load()
+        self._load_from_store()
+
+    def _load_from_store(self) -> None:
+        """Read credentials and build the underlying client from them."""
+        self._tokens = self._store.load()
         _LOGGER.info("Loaded credentials: %s", self._tokens.redacted())
 
         config: dict[str, str] = {
@@ -82,6 +86,22 @@ class EcobeeClient:
             config[ECOBEE_API_KEY] = self._tokens.api_key
 
         self._api = Ecobee(config=config)
+
+    def reload(self) -> bool:
+        """Re-read the credential store, returning True if the token changed.
+
+        Called after a terminal auth failure so that correcting the Secret is
+        enough on its own. Without this the process holds the rejected token in
+        memory for its whole life: an operator could fix the Secret perfectly
+        and watch the importer keep failing against the old value, which is why
+        recovery used to require a pod restart.
+
+        A False return is the useful signal — the store still holds the token
+        that was just rejected, so nothing has been fixed yet.
+        """
+        rejected = self._tokens.refresh_token
+        self._load_from_store()
+        return self._tokens.refresh_token != rejected
 
     # --- token lifecycle ---------------------------------------------------
 

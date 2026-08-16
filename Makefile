@@ -152,9 +152,12 @@ secret: check-derived namespace
 restart: check-derived
 	@kubectl rollout restart deploy/ecobee-runtime-importer -n $(NAMESPACE)
 
-# Full recovery from ecobee_reauth_required, in one step. The restart is not
-# optional: credentials are read once at startup, so a running importer would
-# keep retrying the dead token and never see the corrected Secret.
+# Full recovery from ecobee_reauth_required, in one step.
+#
+# The restart is no longer strictly required — the importer re-reads its
+# credential store after a rejected token, so `make secret` alone recovers
+# within one cycle. It stays in the chain because waiting up to 15 minutes to
+# learn whether the fix worked is a poor way to spend an incident.
 .PHONY: reauth
 reauth: bootstrap secret restart
 

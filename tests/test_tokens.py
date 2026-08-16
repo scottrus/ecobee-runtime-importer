@@ -169,6 +169,31 @@ def test_empty_refresh_token_is_refused():
     assert store.saved == []
 
 
+# --- recovery without a restart ------------------------------------------
+
+
+def test_reload_picks_up_a_replaced_token():
+    """Correcting the Secret must be enough on its own.
+
+    The rejected token was previously held in memory for the life of the
+    process, so an operator could fix the Secret perfectly and watch the
+    importer keep failing until someone restarted the pod.
+    """
+    client, store = client_with(refresh="dead")
+    store.tokens = Tokens(refresh_token="fresh", access_token="")
+
+    changed = client.reload()
+
+    assert changed is True
+    assert client._api.refresh_token == "fresh"
+
+
+def test_reload_reports_no_change_when_the_store_is_untouched():
+    """A False return is the useful signal: nothing has been fixed yet."""
+    client, _ = client_with(refresh="dead")
+    assert client.reload() is False
+
+
 # --- first-request behaviour ---------------------------------------------
 
 
