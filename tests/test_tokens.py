@@ -10,7 +10,7 @@ import json
 import pytest
 
 from ecobee_importer.ecobee import EcobeeClient
-from ecobee_importer.tokens import FileTokenStore, Tokens
+from ecobee_importer.tokens import FileTokenStore, KubernetesSecretStore, Tokens
 
 
 class FakeStore:
@@ -92,6 +92,37 @@ def test_redacted_never_contains_the_token():
     ).redacted()
     assert "super-secret" not in described
     assert "also-secret" not in described
+
+
+# --- the Kubernetes store's URL ------------------------------------------
+
+
+def test_resolved_namespace_reaches_the_url(monkeypatch):
+    """Regression: the URL was built from the constructor ARGUMENT.
+
+    With ECOBEE_SECRET_NAMESPACE unset the argument is "", so the request went
+    to /api/v1/namespaces//secrets/... — an empty path segment, which the API
+    server reads as cluster scope. RBAC then correctly refused it, producing a
+    403 that looked like a broken Role while the Role was fine.
+    """
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "443")
+    monkeypatch.setattr(
+        KubernetesSecretStore, "_own_namespace", staticmethod(lambda: "from-pod")
+    )
+
+    store = KubernetesSecretStore("ecobee-importer-tokens")
+
+    assert "//secrets/" not in store.url
+    assert store.url.endswith(
+        "/api/v1/namespaces/from-pod/secrets/ecobee-importer-tokens"
+    )
+
+
+def test_explicit_namespace_is_honoured(monkeypatch):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    store = KubernetesSecretStore("tokens", "elsewhere")
+    assert "/api/v1/namespaces/elsewhere/secrets/tokens" in store.url
 
 
 # --- rotation handling ---------------------------------------------------

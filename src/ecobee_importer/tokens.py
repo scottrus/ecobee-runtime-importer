@@ -56,6 +56,14 @@ def reject_placeholder(value: str, source: str) -> None:
         )
 
 
+def _api_message(resp) -> str:
+    """The API server's own explanation, which is more useful than any guess."""
+    try:
+        return resp.json().get("message", resp.text)[:400]
+    except ValueError:
+        return resp.text[:400]
+
+
 @dataclass
 class Tokens:
     refresh_token: str
@@ -141,7 +149,16 @@ class KubernetesSecretStore:
                 "ECOBEE_TOKEN_STORE=kubernetes but KUBERNETES_SERVICE_HOST is unset; "
                 "this store only works inside a pod"
             )
-        self.url = f"https://{host}:{port}/api/v1/namespaces/{namespace}/secrets/{name}"
+        # self.namespace, NOT the `namespace` argument. When the argument is
+        # empty the namespace is resolved from the pod's ServiceAccount mount,
+        # and using the raw argument here produced `/api/v1/namespaces//secrets/`
+        # — an empty path segment, which the API server reads as CLUSTER scope
+        # and RBAC then correctly refuses. It surfaced as a 403 that looked like
+        # a Role problem while the Role was perfectly fine.
+        self.url = (
+            f"https://{host}:{port}"
+            f"/api/v1/namespaces/{self.namespace}/secrets/{self.name}"
+        )
         self.ca = f"{SA_DIR}/ca.crt"
         self._sa_token_path = Path(f"{SA_DIR}/token")
 
@@ -155,18 +172,24 @@ class KubernetesSecretStore:
                 f"not be read from {SA_DIR}/namespace: {err}"
             ) from err
 
-    def _explain_403(self, verb: str) -> str:
+    def _explain_403(self, verb: str, detail: str) -> str:
         """The one misconfiguration this store cannot work around.
 
-        The Secret's name appears in two places that must agree: this store's
-        config, and the Role's `resourceNames`. Renaming the Secret without
-        updating the Role produces a 403 that says nothing about why.
+        The API server's own message names the exact identity that was denied,
+        which is the single most useful fact here — it distinguishes a
+        resourceNames mismatch from the request arriving as system:anonymous
+        because no token was presented. It is quoted verbatim rather than
+        summarised: an earlier version of this method asserted a cause instead,
+        and sent a real 403 investigation down the wrong path.
         """
         return (
-            f"Forbidden: the ServiceAccount may not {verb} Secret "
-            f"{self.namespace}/{self.name}. The Role's resourceNames must list "
-            f"exactly this name — if the Secret was renamed, deploy/rbac.yaml "
-            f"needs the same change."
+            f"Forbidden: may not {verb} Secret {self.namespace}/{self.name}.\n"
+            f"  API server said: {detail}\n"
+            f"  Check, in this order:\n"
+            f"    1. the identity in that message — 'system:anonymous' means no "
+            f"ServiceAccount token was presented, not an RBAC problem;\n"
+            f"    2. ECOBEE_SECRET_NAME matches resourceNames in deploy/rbac.yaml;\n"
+            f"    3. the pod's serviceAccountName matches the RoleBinding subject."
         )
 
     def _headers(self, content_type: str | None = None) -> dict:
@@ -180,7 +203,7 @@ class KubernetesSecretStore:
     def load(self) -> Tokens:
         resp = requests.get(self.url, headers=self._headers(), verify=self.ca, timeout=30)
         if resp.status_code == 403:
-            raise PermissionError(self._explain_403("get"))
+            raise PermissionError(self._explain_403("get", _api_message(resp)))
         resp.raise_for_status()
         data = resp.json().get("data", {})
 
@@ -223,7 +246,7 @@ class KubernetesSecretStore:
             # Fatal in a specific way: the token has already been rotated at
             # Auth0, so failing to persist it here means the stored value is
             # now dead and the next restart needs a fresh interactive login.
-            raise PermissionError(self._explain_403("patch"))
+            raise PermissionError(self._explain_403("patch", _api_message(resp)))
         resp.raise_for_status()
         _LOGGER.info(
             "Persisted rotated tokens to Secret %s/%s", self.namespace, self.name
