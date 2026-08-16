@@ -101,8 +101,8 @@ is not true.
 ### 3.1 Request
 
 `GET /1/runtimeReport` with `selectionType=thermostats` and a CSV of thermostat
-identifiers. Limits: **25 thermostats** and **31 days** per request. A four-thermostat
-household is one request per cycle.
+identifiers. Limits: **25 thermostats** and **31 days** per request. Every thermostat on the account
+is fetched in a single request, so a typical household is one request per cycle.
 
 Requested columns (the well-understood subset):
 
@@ -152,8 +152,9 @@ not this endpoint. Confirm against a raw row before reintroducing any scaling.
 `startDate`/`endDate` are documented as UTC, but each row's `date,time` prefix is local to
 the thermostat. Every row must be converted using that thermostat's
 `location.timeZone` before it becomes a sample timestamp. A naive implementation silently
-shifts every sample by the UTC offset — four hours in this house — and the data looks
-entirely reasonable until it is compared against anything else.
+shifts every sample by that zone's UTC offset — and the data looks entirely reasonable
+until it is compared against anything else. Accounts spanning zones make it worse: the
+error differs per thermostat, so the series drift relative to each other.
 
 The importer requests a window padded by one day on each side and filters after
 conversion, so daylight-saving transitions and window boundaries cannot produce edge cases.
@@ -186,9 +187,9 @@ carry `sensor`, `sensor_type` and `sensor_usage`.
 `ecobee_equipment_runtime_seconds` is a **gauge of seconds per bucket**, not a counter.
 Duty cycle is `ecobee_equipment_runtime_seconds / 300`. Do not wrap it in `rate()`.
 
-**There is no per-room humidity.** SmartSensors measure temperature and occupancy;
-humidity exists only at the thermostats. Any room-level dewpoint analysis is limited to
-the four thermostat locations.
+**There is no per-room humidity.** Remote SmartSensors measure temperature and occupancy;
+humidity is measured only at the thermostats themselves. Room-level dewpoint analysis is
+therefore limited to wherever a thermostat is mounted, not to every sensor location.
 
 ---
 
@@ -218,8 +219,11 @@ POST https://auth.ecobee.com/oauth/token
   grant_type=refresh_token & refresh_token=<...> & client_id=183eORFPlXyz9BbDZwqexHPBQoVjgadh
 ```
 
-The importer performs it lazily: on startup, and on any 401 from the API. There is no
-scheduled refresh and no separate refresher component.
+The importer performs it lazily: before the first request when no access token was loaded,
+and whenever the API reports an expired one. There is no scheduled refresh and no separate
+refresher component.
+
+Note that ecobee does **not** use 401 for this — see §4.4 and §9.
 
 **Why there is no credential-refresh CronJob.** Auth0 may rotate the refresh token on
 every use — `python-ecobee-api` handles both cases because ecobee's behaviour here is not
@@ -238,12 +242,15 @@ account out. So after every refresh the importer compares the refresh token to w
 loaded and, if it changed, **writes it back to the Kubernetes Secret** (a strategic-merge
 PATCH via the in-cluster ServiceAccount, RBAC scoped to that one Secret by `resourceNames`).
 
-A consequence worth writing down, because it violates the convention used by every other
-exporter in this estate: **this Secret is mutable state owned by the workload, not a
-static copy of a password-manager item.** After the first rotation the cluster's value and
-the vault's value differ, and the cluster's is authoritative. Restoring the Secret from
-the vault will lock the account out. The vault copy is a bootstrap artefact and a
-disaster-recovery seed, nothing more.
+A consequence worth writing down, because it inverts the usual convention for credential
+Secrets: **this Secret is mutable state owned by the workload, not a static copy of a
+password-manager item.** After the first rotation the cluster's value and any copy you
+kept differ, and the cluster's is authoritative. Restoring the saved copy presents a
+revoked token and locks the account out; back it up by reading it out of the cluster.
+
+This also rules out managing it with GitOps or templating it from the Helm chart — both
+would reassert a stale value on every sync or upgrade. The chart deliberately refuses to
+render a Secret, and `make helm` fails if a template ever does.
 
 A `file` store backend exists for local development and carries the same semantics.
 
@@ -370,15 +377,30 @@ Default backend is VM's `/api/v1/import/prometheus`, which takes Prometheus expo
 text with an explicit millisecond timestamp per sample:
 
 ```
-ecobee_zone_temperature_fahrenheit{thermostat="Basement",thermostat_id="411..."} 72.1 1755302400000
+ecobee_zone_temperature_fahrenheit{thermostat="Downstairs",thermostat_id="4117..."} 72.1 1755302400000
 ```
 
 Chosen over remote-write because it needs no protobuf or snappy dependency, which keeps
 the container small and the failure modes readable.
 
-**Idempotency.** Re-importing a bucket writes an identical sample at an identical
-timestamp. Queries return one value; storage cost is negligible. This is what makes the
-overlap and the restart lookback safe.
+**Re-importing is safe, but it is not free.** Writing a bucket again produces a second
+raw sample at the same timestamp. Value queries still return one value, so the overlap and
+the restart lookback remain correct — but `count_over_time` and `sum_over_time` count raw
+samples, so they inflate. That is why the importer suppresses unchanged re-writes (§5), and
+why a storage-side deduplication setting is worth having as well: the two cover different
+cases, and only the second covers a restart.
+
+VictoriaMetrics keeps one sample per series per `-dedup.minScrapeInterval` interval when
+that flag is set, choosing the biggest timestamp and breaking ties on the biggest value.
+Two consequences worth knowing before enabling it:
+
+- **Set it below the fastest series you store**, not to a nominal scrape interval. Anything
+  sampled faster than the interval is thinned, silently, with no error — data that simply
+  looks sparser than it should.
+- **A downward revision at the same timestamp is not honoured**, because the tie-break
+  prefers the larger value. Buckets usually fill upward as ecobee completes them, so the
+  tie-break normally picks the corrected value — but it is the one case where dedup and
+  the revision handling in §5 pull against each other.
 
 **Query cache.** VictoriaMetrics automatically resets its rollup result cache when samples
 older than `-search.cacheTimestampOffset` (default 5m) are ingested. Every sample this
@@ -402,7 +424,14 @@ The `/metrics` endpoint carries **only facts about this process**. No house data
 | `ecobee_import_cycles_total` | by `result` (`success` / `error`) |
 | `ecobee_api_requests_total` | by `endpoint`, `outcome` — the rate-discipline audit trail |
 | `ecobee_samples_written_total` | volume actually landed |
+| `ecobee_samples_skipped_total` | unchanged buckets suppressed rather than re-written (§5) |
 | `ecobee_token_refreshes_total` | by `outcome`; rotation visible here |
+| `ecobee_importer_build_info` | always 1; carries a `version` label |
+
+Every one of these is a **per-process counter that resets when the pod restarts**. A low
+`ecobee_samples_skipped_total` means a young process, not broken suppression — read it
+alongside `ecobee_import_cycles_total`, since the first cycle after any start has an empty
+cache and legitimately skips nothing.
 
 **These are scraped, not pushed.** Alert rules over them use bare instant selectors. Do
 **not** wrap them in `last_over_time()` — the process holds its gauges between cycles, so
@@ -426,7 +455,7 @@ Goal: never be the reason ecobee rate-limits or blocks an account.
 |---|---|---|
 | `GET /1/runtimeReport` | every 900s (documented floor) | 96 |
 | `GET /1/thermostat` (metadata) | hourly | 24 |
-| `POST /oauth/token` (refresh) | on expiry / 401 | ~24 |
+| `POST /oauth/token` (refresh) | on expiry | ~24 |
 
 **~144 requests per day, total, for the entire household.**
 
@@ -445,9 +474,10 @@ Enforced by construction, not by convention:
 
 | Failure | Detection | Behaviour | Recovery |
 |---|---|---|---|
-| Access token expired | 401 | refresh, retry once | automatic |
+| Access token expired | HTTP **500**, `status.code 14` — not 401 | refresh, retry once | automatic |
+| No access token loaded | empty bearer → `status.code` 1/16 | refresh before the first request (§4.4) | automatic |
 | Refresh token rotated | new value returned | written back to Secret | automatic |
-| `invalid_grant` | refresh rejected | `ecobee_reauth_required 1`, keep running | **human: re-run bootstrap** |
+| `invalid_grant` | refresh rejected | `ecobee_reauth_required 1`, keep running, **re-read the store each cycle** | **human: replace the credential** — no restart needed |
 | ecobee API 5xx / timeout | request fails | cycle counted as error, retried next cycle | automatic |
 | Pod restart / eviction | — | re-import `STARTUP_LOOKBACK_HOURS` | automatic, no data lost |
 | Cluster outage < lookback | — | next cycle backfills the gap | automatic |
@@ -456,8 +486,14 @@ Enforced by construction, not by convention:
 | ecobee changes Auth0 forms | bootstrap fails | existing tokens keep working | bump `python-ecobee-api` |
 | Thermostat offline | its buckets stop | `ecobee_newest_bucket_timestamp_seconds` goes stale | investigate the thermostat |
 
-The watermark advancing only after a successful write is what makes a VM outage lossless
-rather than a silent hole.
+The watermark advancing only after a successful write is what makes a destination outage
+lossless rather than a silent hole.
+
+Two of these rows are counter-intuitive enough to be worth restating: ecobee signals auth
+failures with **HTTP 500 and a `status.code`**, not with 401 — a client that retries on 401
+will never refresh — and a **rejected credential is recoverable without a restart**, because
+the process re-reads its credential store on every such failure rather than holding the
+rejected token for its lifetime.
 
 ---
 
@@ -476,8 +512,13 @@ Interactive "what is it doing right now" queries are served by
 
 If it is deployed, it **must** run in its `readonly` credential mode against the same
 Secret — a mode built for precisely this, described upstream as piggybacking on another
-application's authenticated session. The importer stays the sole token writer (§4.2); the
-MCP server reads, and re-reads on 401 after a rotation.
+application's authenticated session. The importer stays the sole token writer (§4.2) and
+the MCP server only reads, which is what keeps the rotation race in §4.2 closed.
+
+⚠️ Untested caveat: upstream's readonly mode re-reads its credentials **on a 401**. Given
+ecobee reports auth failures as HTTP 500 with a `status.code` (§4.4), that trigger may
+never fire, leaving it holding a rotated-away token until restarted. Worth verifying
+before relying on it to recover unattended.
 
 A second consideration for that deployment: `ecobee-mcp` ships write tools (set
 temperature, set hold, create vacation, send message). The web OAuth scope includes
@@ -493,8 +534,8 @@ The widely repeated claim, including in this document's own first draft, is that
 only by pairing the thermostat to HomeKit Controller locally.
 
 **That is wrong for `runtimeReport`.** The first live run against a real account returned
-seven of them as `sensorType: dryContact` — front, back, bedroom, basement, mudroom and two
-garage doors — with the same 5-minute history as every other sensor. They are exported as
+several as `sensorType: dryContact` — exterior and interior doors — with the same 5-minute
+history as every other sensor. They are exported as
 `ecobee_sensor_contact`, 1 open and 0 closed.
 
 Two lessons worth keeping:
