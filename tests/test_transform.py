@@ -137,6 +137,19 @@ def test_unknown_sensor_type_still_exports():
     assert fallback[0].value == 42.0
 
 
+def test_unresolvable_zone_fails_rather_than_shifting_data():
+    """A wrong zone shifts every sample by the offset and still looks plausible.
+
+    Failing the cycle is recoverable: it retries in 15 minutes and alerts. A
+    silent UTC fallback writes four-hours-wrong history that has to be noticed
+    later and re-imported.
+    """
+    import pytest
+
+    with pytest.raises(RuntimeError, match="tz database|Cannot resolve time zone"):
+        list(thermostat_samples(REPORT, NAMES, {"411111111111": "Not/AZone"}))
+
+
 def test_labels_identify_the_thermostat():
     for sample in all_samples(REPORT, NAMES, ZONES):
         assert sample.labels["thermostat"] == "Basement"

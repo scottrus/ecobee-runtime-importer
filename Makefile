@@ -281,6 +281,9 @@ docker-smoke:
 		docker run --rm --entrypoint python $(IMAGE) -c \
 			'import ecobee_importer as m; print(m.__version__)' >/dev/null; \
 		echo "    package imports inside the image"; \
+		docker run --rm --entrypoint python $(IMAGE) -c \
+			'from zoneinfo import ZoneInfo; ZoneInfo("America/New_York"); ZoneInfo("UTC")'; \
+		echo "    IANA time zones resolve inside the image"; \
 		docker run --rm --read-only $(IMAGE) --version >/dev/null; \
 		echo "    starts with a READ-ONLY rootfs, as the Deployment runs it"; \
 		out="$$(docker run --rm $(IMAGE) 2>&1 || true)"; \
