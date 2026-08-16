@@ -142,3 +142,33 @@ def test_a_changed_value_is_written_on_the_next_cycle():
 
     assert importer.cycle() == 1
     assert [s.value for s in writer.samples] == [72.1, 80.0]
+
+
+def test_samples_are_streamed_not_materialised():
+    """Peak memory must not scale with the window length.
+
+    A 30-day rebuild is ~884,000 samples at ~514 bytes each — 434 MB against a
+    192Mi container limit, which OOMKilled while the loop built a list.
+    """
+    import tracemalloc
+
+    from ecobee_importer.transform import all_samples, iter_all_samples
+
+    moments = [
+        datetime.now(UTC) - timedelta(minutes=5 * i) for i in range(1, 2000)
+    ]
+    report = report_at(moments)
+    names = {IDENT: "Basement"}
+    zones = {IDENT: "America/New_York"}
+
+    tracemalloc.start()
+    count = sum(1 for _ in iter_all_samples(report, names, zones))
+    streamed = tracemalloc.get_traced_memory()[1]
+    tracemalloc.reset_peak()
+    all_samples(report, names, zones)
+    materialised = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert count > 1000
+    # Generous bound: the point is that one is bounded and the other is not.
+    assert streamed * 10 < materialised
