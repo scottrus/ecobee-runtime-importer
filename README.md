@@ -53,7 +53,13 @@ dewpoint analysis is limited to those locations.
 
 ## Setup
 
-Four steps: clone, bootstrap a token, create the namespace and Secret, deploy.
+Four steps: clone, bootstrap a token, create the Secret, deploy with Helm.
+
+The clone and the `make` targets exist for one reason: **the credential Secret is
+not managed by Helm.** The importer rotates the refresh token in place, so a
+Helm-templated Secret would be reset on every upgrade. Minting and replacing that
+token is a local, interactive job — that is what the Makefile automates.
+Deployment itself is plain `helm`.
 
 ```bash
 git clone https://github.com/scottrus/ecobee-runtime-importer.git && cd ecobee-runtime-importer
@@ -119,32 +125,43 @@ rm credentials.json
 
 ### 3. Deploy
 
-Nothing to build. Every tagged release publishes a multi-arch image with an SBOM
-and a signed provenance attestation, plus a versioned Helm chart to GHCR.
+Nothing to build. Every tagged release publishes a multi-arch image and a
+versioned Helm chart to GHCR, with an SBOM and a signed provenance attestation.
 
 ```bash
-make deploy
+helm upgrade --install ecobee-runtime-importer \
+  oci://ghcr.io/scottrus/charts/ecobee-runtime-importer \
+  --version 0.1.5 \
+  --namespace ecobee-runtime-importer --create-namespace \
+  --set fullnameOverride=ecobee-runtime-importer \
+  --set victoriaMetrics.url=http://vmsingle-vmks-victoria-metrics-k8s-stack.monitoring.svc.cluster.local:8428/api/v1/import/prometheus
 ```
 
-That is `helm upgrade --install` with the chart in this repo. To install a
-published chart version instead, without a clone:
+**`victoriaMetrics.url` is the one value you must set.** The chart's default is a
+placeholder, and a bare service name will not resolve from another namespace.
+Everything else has a working default — see [Configuration](#configuration).
+
+**Keep `fullnameOverride`.** Without it Helm prefixes the release name onto every
+resource, which changes the `job` label and orphans existing metric history.
+
+For anything beyond a couple of overrides, use a values file:
 
 ```bash
-helm upgrade --install ecobee-runtime-importer oci://ghcr.io/scottrus/charts/ecobee-runtime-importer --version 0.1.4 --namespace ecobee-runtime-importer --create-namespace --set fullnameOverride=ecobee-runtime-importer
+helm upgrade --install ecobee-runtime-importer oci://ghcr.io/scottrus/charts/ecobee-runtime-importer --version 0.1.5 -n ecobee-runtime-importer -f my-values.yaml
 ```
 
-**Set `victoriaMetrics.url` for your cluster.** The default is a placeholder, and
-a bare service name will not resolve from another namespace:
+<details>
+<summary>Deploying the chart from a clone instead</summary>
+
+`make deploy` runs `helm upgrade --install` against `charts/` in the working
+tree, with the namespace and `fullnameOverride` filled in. That is for
+developing the chart; released deployments should name a published version so
+what ran is recoverable from the tag.
 
 ```bash
-make deploy HELM_ARGS='--set victoriaMetrics.url=http://vmsingle-vmks-victoria-metrics-k8s-stack.monitoring.svc.cluster.local:8428/api/v1/import/prometheus'
+make deploy HELM_ARGS='--set victoriaMetrics.url=http://...'
 ```
-
-Or keep a values file and pass `-f`. See [Configuration](#configuration).
-
-> **Keep `fullnameOverride`.** Without it Helm prefixes the release name onto
-> every resource, which changes the `job` label and orphans existing metric
-> history under the old name.
+</details>
 
 ### 4. Confirm it works
 
@@ -256,12 +273,15 @@ pod spec. That matters because the process reads its environment once at startup
 
 ### Deploying to a different namespace
 
+Pass `--namespace`. Helm namespaces the whole release, so nothing in the chart
+needs editing, and the importer resolves its Secret's namespace from the pod at
+runtime.
+
 ```bash
-make deploy NAMESPACE=my-namespace
+helm upgrade --install ecobee-runtime-importer oci://ghcr.io/scottrus/charts/ecobee-runtime-importer --version 0.1.5 --namespace my-namespace --create-namespace --set fullnameOverride=ecobee-runtime-importer
 ```
 
-Helm namespaces the whole release, so nothing in the chart needs editing. The
-importer resolves its Secret's namespace from the pod at runtime.
+`make secret NAMESPACE=my-namespace` puts the credential in the same place.
 
 One caveat outside this repo's control: `VMServiceScrape` and `VMRule` are only
 discovered from an arbitrary namespace if your VMAgent and VMAlert run
