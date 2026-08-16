@@ -6,6 +6,11 @@
 # namespace means the blast radius of that grant is a namespace containing
 # nothing else, even though the Role is already scoped to a single Secret by
 # name.
+# ⚠️ THE NAME BELOW IS OVERWRITTEN BY KUSTOMIZE. The `namespace:` field in
+# kustomization.yaml is the single source of truth — its transformer renames this
+# resource as well as setting metadata.namespace on everything else. The literal
+# here is the default, kept so this file is not misleading on its own; edit
+# kustomization.yaml to deploy elsewhere.
 apiVersion: v1
 kind: Namespace
 metadata:

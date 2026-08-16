@@ -12,6 +12,12 @@ metadata:
 #
 # `resourceNames` is what keeps that narrow. Without it, `patch` on secrets is
 # patch on EVERY secret in the namespace.
+#
+# THE VALUE BELOW IS OVERWRITTEN BY KUSTOMIZE. A replacement in kustomization.yaml
+# copies ECOBEE_SECRET_NAME from config.env into it, so the Secret is named in
+# exactly one place. The literal here is the same default, kept so that applying
+# this file on its own is not broken — but editing it alone has no effect on a
+# `kubectl apply -k` deployment.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

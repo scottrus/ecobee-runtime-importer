@@ -1,23 +1,61 @@
 ---
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# Its own namespace, not a shared monitoring one: this workload's ServiceAccount
-# can `patch` a Secret, and isolating that keeps the grant's blast radius to a
-# namespace holding nothing else.
+
+# ============================================================================
+# THE SINGLE SOURCE OF TRUTH FOR THE NAMESPACE.
 #
-# Changing this one line moves the whole deployment. The importer resolves the
-# Secret's namespace from its own ServiceAccount mount, so nothing else needs
-# editing — and VMAgent/VMAlert in this cluster run selectAllByDefault: true, so
-# the VMServiceScrape and VMRule are still discovered from here.
+# Change this one line to deploy elsewhere. Nothing else needs editing: the
+# transformer rewrites metadata.namespace on every namespaced resource AND
+# renames the Namespace resource itself, and the importer resolves the Secret's
+# namespace from its own ServiceAccount mount at runtime.
+#
+# Note the CRs are only discovered from a non-monitoring namespace if your
+# VMAgent and VMAlert run selectAllByDefault: true, or you add matching
+# namespace selectors.
+# ============================================================================
 namespace: ecobee-runtime-importer
 
-# secret.example.yaml is deliberately NOT included. The Secret is created
-# out-of-band from scripts/bootstrap.py output and then rotated in place by the
-# importer; applying it from here would overwrite a live token with a stale one.
 resources:
   - namespace.yaml
-  - configmap.yaml
   - rbac.yaml
   - deployment.yaml
   - service.yaml
   - vmrule.yaml
+
+# The ConfigMap is GENERATED rather than checked in, so its name carries a hash
+# of the contents. kustomize rewrites the Deployment's envFrom reference to the
+# hashed name, which means editing config.env changes the pod spec and rolls the
+# deployment automatically.
+#
+# That matters because the process reads its environment once at startup: with a
+# static ConfigMap, an edit applies cleanly, changes nothing, and waits silently
+# for the next unrelated restart.
+configMapGenerator:
+  - name: ecobee-runtime-importer-config
+    envs:
+      - config.env
+
+# secret.example.yaml is deliberately NOT a resource. The Secret is created
+# out-of-band from bootstrap output and then rotated in place by the importer;
+# applying it from here would overwrite a live token with a stale one.
+
+# ----------------------------------------------------------------------------
+# Replacements exist so that values which MUST agree cannot drift. Each one
+# below replaced a comment that asked a human to keep two files in sync.
+# ----------------------------------------------------------------------------
+replacements:
+  # The Role is scoped to a single Secret by name — that is what keeps `patch`
+  # on secrets from meaning every secret in the namespace. Renaming the Secret
+  # in config.env alone used to produce a 403 with no explanation; now the Role
+  # follows it.
+  - source:
+      kind: ConfigMap
+      name: ecobee-runtime-importer-config
+      fieldPath: data.ECOBEE_SECRET_NAME
+    targets:
+      - select:
+          kind: Role
+          name: ecobee-runtime-importer-tokens
+        fieldPaths:
+          - rules.0.resourceNames.0
