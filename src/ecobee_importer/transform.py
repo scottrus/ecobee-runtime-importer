@@ -14,7 +14,7 @@ unscaled; confirm against a raw row before ever reintroducing a divisor.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -259,12 +259,26 @@ def sensor_samples(
                 )
 
 
+def iter_all_samples(
+    report: dict[str, Any],
+    names: dict[str, str],
+    zones: dict[str, str],
+) -> Iterator[Sample]:
+    """Yield every sample lazily.
+
+    A generator rather than a list because the caller may be importing 30 days:
+    884,384 samples measured at ~514 bytes each is 434 MB of objects, against a
+    192Mi container limit. Nothing needs them all at once — they are filtered,
+    deduplicated and written in batches — so nothing should hold them all.
+    """
+    yield from thermostat_samples(report, names, zones)
+    yield from sensor_samples(report, names, zones)
+
+
 def all_samples(
     report: dict[str, Any],
     names: dict[str, str],
     zones: dict[str, str],
 ) -> list[Sample]:
-    return [
-        *thermostat_samples(report, names, zones),
-        *sensor_samples(report, names, zones),
-    ]
+    """Materialise every sample. Only for a short window — see iter_all_samples."""
+    return list(iter_all_samples(report, names, zones))

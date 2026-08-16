@@ -300,8 +300,8 @@ startup → load tokens → resolve thermostats (identifiers, names, time zones)
   ↓
   ├── every 900s ──→ window = [watermark - overlap, now]
   │                  GET /1/runtimeReport (+includeSensors)
-  │                  rows → local time → UTC → samples
-  │                  POST to VictoriaMetrics
+  │                  rows → local time → UTC → samples   (streamed, never a list)
+  │                  drop unchanged → batch → POST to VictoriaMetrics
   │                  advance watermark
   ↓
 /metrics (self-health only, scraped)
@@ -339,6 +339,21 @@ still prefer `sum_over_time(last_over_time(...)[...])` over the raw form.
 the next cycle. Only invalid configuration at startup is fatal. This is what keeps the
 process from crash-looping into ecobee's rate limit — a container that restarts every 30
 seconds and fetches on boot would violate §1.3 no matter what the interval setting says.
+
+**Samples are streamed, never materialised.** The transform is a generator and the loop
+writes in batches of 10,000, so peak memory does not scale with the window length.
+
+That is not a micro-optimisation. A 30-day rebuild is ~884,000 samples at ~514 bytes
+each — **434 MB of objects against a 192Mi container limit**, which OOMKilled. Measured on
+a synthetic 30-day report: 224 MB materialised versus **0.4 MB streamed**, a 564x
+reduction. A full 30-day rebuild originally required a temporary 2Gi limit; it no longer
+does.
+
+The window can therefore be as long as the API allows (31 days) without a memory
+consequence. That matters because this history is **reconstructible** — `runtimeReport`
+serves 31 days retroactively, so deleting the imported series and re-importing is a valid
+repair for corruption, a gap, or duplication. Metrics are not usually recoverable that
+way, and a repair should not need a deployment change to run.
 
 **Thermostat metadata is cached for an hour.** Identifiers, display names and time zones
 come from `GET /1/thermostat`, refreshed hourly — one call per hour, which also surfaces

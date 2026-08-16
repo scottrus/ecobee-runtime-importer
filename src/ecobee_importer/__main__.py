@@ -38,8 +38,8 @@ from .health import (
     serve,
 )
 from .tokens import build_store
-from .transform import all_samples
-from .writer import VictoriaMetricsWriter
+from .transform import all_samples, iter_all_samples
+from .writer import BATCH_LINES, VictoriaMetricsWriter
 
 _LOGGER = logging.getLogger("ecobee_importer")
 
@@ -158,54 +158,66 @@ class Importer:
 
         start_ms = int(start.timestamp() * 1000)
         now_ms = int(now.timestamp() * 1000)
-        samples = [
-            s
-            for s in all_samples(report, names, zones)
-            if start_ms <= s.timestamp_ms <= now_ms
-        ]
 
-        if not samples:
+        if dry_run:
+            _summarize(report, all_samples(report, names, zones))
+            return 0
+
+        # Streamed, not materialised. A 30-day rebuild is ~884,000 samples at
+        # ~514 bytes each — 434 MB of objects against a 192Mi limit, which
+        # OOMKilled until this loop stopped building a list. Nothing needs them
+        # all at once: each is filtered, deduplicated, and written in batches.
+        written = 0
+        skipped = 0
+        newest = 0
+        per_thermostat: dict[str, int] = {}
+        batch: list = []
+
+        def flush() -> None:
+            nonlocal written
+            if not batch:
+                return
+            written += self.writer.write(batch)
+            # Only after the write lands, so a failure retries these buckets.
+            self._sent.remember(batch)
+            batch.clear()
+
+        for sample in iter_all_samples(report, names, zones):
+            if not (start_ms <= sample.timestamp_ms <= now_ms):
+                continue
+
+            newest = max(newest, sample.timestamp_ms)
+            name = sample.labels.get("thermostat")
+            if name:
+                per_thermostat[name] = max(
+                    per_thermostat.get(name, 0), sample.timestamp_ms
+                )
+
+            if not self._sent.is_unsent(sample):
+                skipped += 1
+                continue
+
+            batch.append(sample)
+            if len(batch) >= BATCH_LINES:
+                flush()
+        flush()
+
+        if not newest:
             _LOGGER.info("No new buckets in window")
             return 0
 
-        if dry_run:
-            _summarize(report, samples)
-            return 0
-
-        # Send only what is new or has changed. The overlap window deliberately
-        # re-requests buckets already imported — with a 60-minute overlap and a
-        # 15-minute interval each one is offered four times — and re-writing an
-        # identical value inflates every raw-sample function that reads it.
-        fresh = self._sent.unsent(samples)
-        skipped = len(samples) - len(fresh)
+        SAMPLES_WRITTEN.inc(written)
         if skipped:
             SAMPLES_SKIPPED.inc(skipped)
 
-        written = 0
-        if fresh:
-            written = self.writer.write(fresh)
-            SAMPLES_WRITTEN.inc(written)
-            # Only after the write lands: recording first would silently drop
-            # these buckets on the retry after a failed write.
-            self._sent.remember(fresh)
-        else:
-            _LOGGER.info("No new or changed buckets in window (%d unchanged)", skipped)
-
         # Advance only after a successful write, so a VictoriaMetrics outage is
         # retried rather than skipped over.
-        newest = max(s.timestamp_ms for s in samples)
         newest_dt = datetime.fromtimestamp(newest / 1000, tz=UTC)
         if since is None:
             self.watermark = max(self.watermark, newest_dt)
 
-        for thermostat in thermostats:
-            per_stat = [
-                s.timestamp_ms
-                for s in samples
-                if s.labels.get("thermostat") == thermostat.name
-            ]
-            if per_stat:
-                NEWEST_BUCKET.labels(thermostat=thermostat.name).set(max(per_stat) / 1000)
+        for thermostat_name, ts in per_thermostat.items():
+            NEWEST_BUCKET.labels(thermostat=thermostat_name).set(ts / 1000)
 
         # Anything older than the overlap will never be offered again, so
         # remembering it buys nothing and the cache would grow without bound.

@@ -47,13 +47,21 @@ class SentCache:
     def __len__(self) -> int:
         return len(self._seen)
 
+    def is_unsent(self, sample: Sample) -> bool:
+        """Whether this one sample is new, or carries a changed value.
+
+        The single-sample form exists so the import loop can stream: holding
+        every sample to filter a list is what this class is trying to avoid.
+        """
+        return self._seen.get(_key(sample)) != sample.value
+
     def unsent(self, samples: list[Sample]) -> list[Sample]:
         """Return only the samples that are new, or whose value changed.
 
         Comparison is on the value, not merely on presence: ecobee revises
         recent buckets, and a revision must reach the database.
         """
-        return [s for s in samples if self._seen.get(_key(s)) != s.value]
+        return [s for s in samples if self.is_unsent(s)]
 
     def remember(self, samples: list[Sample]) -> None:
         """Record samples as written. Call only AFTER a successful write.
