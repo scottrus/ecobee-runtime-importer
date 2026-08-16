@@ -105,11 +105,27 @@ def _to_utc_ms(date_str: str, time_str: str, tz: ZoneInfo) -> int | None:
 
 
 def _zone(name: str) -> ZoneInfo:
+    """Resolve a thermostat's IANA zone, or fail the cycle.
+
+    Deliberately does NOT fall back to UTC. Rows are in thermostat-local time,
+    so the wrong zone shifts every sample by the offset — four hours here — and
+    produces data that looks entirely reasonable while being wrong. A failed
+    cycle retries in 15 minutes and raises an alert; silently shifted history
+    has to be discovered later and re-imported.
+
+    The earlier UTC fallback was worse than useless: on an image with no tz
+    database at all, ZoneInfo("UTC") raises too, so the fallback only added a
+    second traceback to the first one.
+    """
     try:
         return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
-        _LOGGER.error("Unknown time zone %r; falling back to UTC", name)
-        return ZoneInfo("UTC")
+    except (ZoneInfoNotFoundError, ValueError) as err:
+        raise RuntimeError(
+            f"Cannot resolve time zone {name!r}: {err}. If this is a container, "
+            f"the tz database is missing — `zoneinfo` reads the SYSTEM database "
+            f"and minimal images ship none. The `tzdata` package is a hard "
+            f"dependency for exactly this reason."
+        ) from err
 
 
 def _numeric(raw: str) -> float | None:

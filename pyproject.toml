@@ -13,6 +13,12 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "requests>=2.31,<3",
     "prometheus-client>=0.20,<1",
+    # Not optional. Report rows arrive in the thermostat's local time and must be
+    # converted with its IANA zone, but `zoneinfo` reads the SYSTEM tz database —
+    # which minimal container images do not ship. Chainguard's python image has
+    # none, so without this ZoneInfo("America/New_York") raises, and so does the
+    # ZoneInfo("UTC") fallback. Works on any developer laptop, fails in the image.
+    "tzdata>=2024.1",
     # Pinned to a minor line deliberately. This project calls
     # Ecobee._request_with_refresh, which owns ecobee's non-standard auth error
     # mapping (HTTP 500 + status.code 14/1/16, not 401). Read the release notes
