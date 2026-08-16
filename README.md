@@ -153,11 +153,16 @@ versioned Helm chart to GHCR, with an SBOM and a signed provenance attestation.
 ```bash
 helm upgrade --install ecobee-runtime-importer \
   oci://ghcr.io/scottrus/charts/ecobee-runtime-importer \
-  --version 0.1.5 \
+  --version <version> \        # see Releases for the current one
   --namespace ecobee-runtime-importer --create-namespace \
   --set fullnameOverride=ecobee-runtime-importer \
-  --set victoriaMetrics.url=http://vmsingle-vmks-victoria-metrics-k8s-stack.monitoring.svc.cluster.local:8428/api/v1/import/prometheus
+  --set victoriaMetrics.url=http://vmsingle-<release>.<namespace>.svc.cluster.local:8428/api/v1/import/prometheus
 ```
+
+Pin an explicit `--version` from the
+[Releases](https://github.com/scottrus/ecobee-runtime-importer/releases) page rather than
+taking whatever is newest — an unpinned upgrade is not something you want happening by
+surprise to a workload that holds a rotating credential.
 
 **`victoriaMetrics.url` is the one value you must set.** The chart's default is a
 placeholder, and a bare service name will not resolve from another namespace.
@@ -169,7 +174,7 @@ resource, which changes the `job` label and orphans existing metric history.
 For anything beyond a couple of overrides, use a values file:
 
 ```bash
-helm upgrade --install ecobee-runtime-importer oci://ghcr.io/scottrus/charts/ecobee-runtime-importer --version 0.1.5 -n ecobee-runtime-importer -f my-values.yaml
+helm upgrade --install ecobee-runtime-importer oci://ghcr.io/scottrus/charts/ecobee-runtime-importer --version <version> -n ecobee-runtime-importer -f my-values.yaml
 ```
 
 <details>
@@ -300,7 +305,7 @@ needs editing, and the importer resolves its Secret's namespace from the pod at
 runtime.
 
 ```bash
-helm upgrade --install ecobee-runtime-importer oci://ghcr.io/scottrus/charts/ecobee-runtime-importer --version 0.1.5 --namespace my-namespace --create-namespace --set fullnameOverride=ecobee-runtime-importer
+helm upgrade --install ecobee-runtime-importer oci://ghcr.io/scottrus/charts/ecobee-runtime-importer --version <version> --namespace my-namespace --create-namespace --set fullnameOverride=ecobee-runtime-importer
 ```
 
 `make secret NAMESPACE=my-namespace` puts the credential in the same place.
