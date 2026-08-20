@@ -45,7 +45,7 @@ RUN pip install --no-cache-dir .
 USER nonroot
 
 # --- runtime ----------------------------------------------------------------
-FROM cgr.dev/chainguard/python:latest@sha256:605be9a2e22b32c98b94c2a1bcbd27f9e35a2616282abca488d2eb035e97b660
+FROM cgr.dev/chainguard/python:latest@sha256:6d71f8dbd199350964ce8b10d50fb9d4d8e2bd50316f3a1821dbdc6eef5252fb
 
 LABEL org.opencontainers.image.title="ecobee-runtime-importer" \
       org.opencontainers.image.description="Imports ecobee runtimeReport history into VictoriaMetrics, without a developer API key" \
