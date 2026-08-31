@@ -9,7 +9,7 @@
 
 # --- build ------------------------------------------------------------------
 # The -dev variant carries pip and a shell; the runtime variant carries neither.
-FROM cgr.dev/chainguard/python:latest-dev@sha256:21b83f9766bdc6a8d2180f4950c00079eac274944109a95d858bcb989525d2b6 AS build
+FROM cgr.dev/chainguard/python:latest-dev@sha256:f0f3f01288b7ae009d90828d2dbd2f3c949aa3b6e820081cb278880d758ffb44 AS build
 
 # Chainguard's -dev variants still default to the nonroot user, so writing to /
 # is denied. Switch to root for the build only — this stage is discarded, and the
@@ -45,7 +45,7 @@ RUN pip install --no-cache-dir .
 USER nonroot
 
 # --- runtime ----------------------------------------------------------------
-FROM cgr.dev/chainguard/python:latest@sha256:6d71f8dbd199350964ce8b10d50fb9d4d8e2bd50316f3a1821dbdc6eef5252fb
+FROM cgr.dev/chainguard/python:latest@sha256:f487e51ca6ee4b20e07e1b4c9c44d3108ab305d2318b0f233f5b72529f52a6aa
 
 LABEL org.opencontainers.image.title="ecobee-runtime-importer" \
       org.opencontainers.image.description="Imports ecobee runtimeReport history into VictoriaMetrics, without a developer API key" \
