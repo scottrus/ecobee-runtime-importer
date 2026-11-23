@@ -5,7 +5,8 @@ write. That is what makes a VictoriaMetrics outage a retry rather than a silent
 hole in the data.
 """
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -14,15 +15,19 @@ from ecobee_importer.config import Config
 from ecobee_importer.ecobee import Thermostat
 
 IDENT = "411111111111"
+ZONE = "America/New_York"
 
 
 def report_at(moments, temp="72.1"):
     """A minimal runtimeReport whose rows sit at the given UTC datetimes.
 
     Rows are emitted in thermostat-local time, as the real API does, so this
-    also exercises the timezone conversion end to end.
+    also exercises the timezone conversion end to end. The zone must be the
+    thermostat's own IANA zone. A fixed offset is right for half the year only;
+    in the other half every row reads one hour late, so a row from 30 minutes
+    ago lands in the future and the importer drops it.
     """
-    local = [m.astimezone(timezone(timedelta(hours=-4))) for m in moments]
+    local = [m.astimezone(ZoneInfo(ZONE)) for m in moments]
     return {
         "columns": "zoneAveTemp",
         "reportList": [
@@ -40,7 +45,7 @@ class FakeClient:
         self.calls = 0
 
     def thermostats(self):
-        return [Thermostat(IDENT, "Basement", "America/New_York")]
+        return [Thermostat(IDENT, "Basement", ZONE)]
 
     def runtime_report(self, *args, **kwargs):
         self.calls += 1
