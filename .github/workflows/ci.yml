@@ -28,10 +28,10 @@ jobs:
       fail-fast: false
       matrix:
         # 3.11 is the floor pyproject claims, so it catches an accidental
-        # newer-syntax dependency. 3.14 is what the published image actually
+        # newer-syntax dependency. 3.15 is what the published image actually
         # runs — the Chainguard base tracks the newest Python, so without it
         # the one interpreter users receive would be the one nothing tests.
-        python-version: ["3.11", "3.13", "3.14"]
+        python-version: ["3.11", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
